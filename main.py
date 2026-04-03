@@ -285,12 +285,6 @@ def parse_omie_decimal(value: str) -> float:
 
 
 def load_omie_day_prices(target_date: date) -> dict[int, float]:
-    """
-    Devolve dict {hora_inicio: preco_eur_kwh}
-    Exemplo:
-      0 -> preço da hora 00:00-01:00
-      1 -> preço da hora 01:00-02:00
-    """
     url = omie_file_url_for_date(target_date)
     print(f"DEBUG OMIE URL: {url}")
     raw = fetch_text(url)
@@ -303,37 +297,34 @@ def load_omie_day_prices(target_date: date) -> dict[int, float]:
     prices_mwh: dict[int, float] = {}
 
     for line in lines:
-        # Normalmente vem algo tipo:
-        # 1;21,20
-        # ou com mais colunas; apanhamos a primeira coluna como hora e a última como preço
-        parts = [p.strip() for p in re.split(r"[;,\t]", line) if p.strip()]
+        # Exemplo real:
+        # 2026;04;01;1;9.17;9.17;
+        parts = [p.strip() for p in line.split(";") if p.strip()]
 
-        # Tentativa 1: linha simples "1;21,20"
-        if ";" in line:
-            semi_parts = [p.strip() for p in line.split(";")]
-            if len(semi_parts) >= 2 and semi_parts[0].isdigit():
-                hour_num = int(semi_parts[0])
-                try:
-                    price_mwh = parse_omie_decimal(semi_parts[-1])
-                    if 1 <= hour_num <= 24:
-                        prices_mwh[hour_num - 1] = price_mwh
-                        continue
-                except Exception:
-                    pass
+        if len(parts) >= 5:
+            try:
+                year = int(parts[0])
+                month = int(parts[1])
+                day = int(parts[2])
+                hour_num = int(parts[3])  # 1 a 24
+                price_mwh = float(parts[4])  # PT
 
-        # Tentativa 2: procura padrão hora + preço no fim
-        m = re.match(r"^\s*(\d{1,2})\D+([0-9]+(?:[.,][0-9]+)?)\s*$", line)
-        if m:
-            hour_num = int(m.group(1))
-            price_mwh = parse_omie_decimal(m.group(2))
-            if 1 <= hour_num <= 24:
-                prices_mwh[hour_num - 1] = price_mwh
+                # Garantir que é o dia certo
+                if date(year, month, day) != target_date:
+                    continue
+
+                if 1 <= hour_num <= 24:
+                    prices_mwh[hour_num - 1] = price_mwh
+
+            except Exception:
+                continue
 
     if len(prices_mwh) < 24:
         raise RuntimeError(
             f"Não foi possível ler 24 preços OMIE para {target_date}. Obtidos: {len(prices_mwh)}"
         )
 
+    # Conversão para €/kWh + tarifas
     perdas = get_env_float("PERDAS", 0.15)
     fadeq = get_env_float("FADEQ", 1.02)
     ac = get_env_float("AC", 0.0055)
@@ -347,7 +338,6 @@ def load_omie_day_prices(target_date: date) -> dict[int, float]:
         omie_kwh = omie_mwh / 1000.0
         base = (omie_kwh * fadeq * (1.0 + perdas)) + ac + ggs
 
-        # Aqui o custo real também respeita o teu período horário:
         if 22 <= hour_start or hour_start < 8:
             final_price = base + tar_vazio
         else:
@@ -355,7 +345,7 @@ def load_omie_day_prices(target_date: date) -> dict[int, float]:
 
         prices_kwh[hour_start] = final_price
 
-    print("DEBUG OMIE preços finais €/kWh (primeiras horas):", {k: round(v, 5) for k, v in list(prices_kwh.items())[:6]})
+    print("DEBUG OMIE preços finais €/kWh:", {k: round(v, 5) for k, v in prices_kwh.items()})
     return prices_kwh
 
 
