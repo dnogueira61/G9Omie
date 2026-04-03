@@ -4,6 +4,7 @@ import csv
 import json
 import urllib.request
 import urllib.parse
+import urllib.error
 from io import StringIO
 from html import unescape
 from datetime import datetime, timedelta
@@ -120,43 +121,63 @@ def load_eredes_data() -> list[dict]:
     return rows
 
 
-def calculate_consumption_costs(rows: list[dict], preco_vazio: float, preco_fv: float) -> dict | None:
-    if len(rows) < 2:
-        return None
-
+def calculate_consumption_costs(rows: list[dict], preco_vazio: float, preco_fv: float) -> dict:
     tz = ZoneInfo("Europe/Lisbon")
     hoje = datetime.now(tz).date()
-    ontem = hoje - timedelta(days=1)
-    primeiro_dia_mes = ontem.replace(day=1)
+
+    if not rows:
+        return {
+            "tem_dados_ontem": False,
+            "ultima_atualizacao": None,
+            "acumulado_vazio": 0.0,
+            "acumulado_fv": 0.0,
+            "acumulado_total": 0.0,
+            "custo_mes_vazio": 0.0,
+            "custo_mes_fv": 0.0,
+            "custo_mes_total": 0.0,
+        }
 
     by_date = {r["date"]: r for r in rows}
+    datas = sorted(by_date.keys())
+    ultima_data = datas[-1]
 
-    if ontem not in by_date or (ontem - timedelta(days=1)) not in by_date:
-        return None
+    tem_dados_ontem = False
+    consumo_ontem_vazio = 0.0
+    consumo_ontem_fv = 0.0
+    consumo_ontem_total = 0.0
+    custo_ontem_vazio = 0.0
+    custo_ontem_fv = 0.0
+    custo_ontem_total = 0.0
 
-    # Consumo de ontem = leitura de ontem - leitura do dia anterior
-    r_ontem = by_date[ontem]
-    r_ant = by_date[ontem - timedelta(days=1)]
+    ontem = hoje - timedelta(days=1)
 
-    consumo_ontem_vazio = r_ontem["vazio"] - r_ant["vazio"]
-    consumo_ontem_fv = r_ontem["fv"] - r_ant["fv"]
-    consumo_ontem_total = consumo_ontem_vazio + consumo_ontem_fv
+    if ontem in by_date and (ontem - timedelta(days=1)) in by_date:
+        r_ontem = by_date[ontem]
+        r_ant = by_date[ontem - timedelta(days=1)]
 
-    custo_ontem_vazio = consumo_ontem_vazio * preco_vazio
-    custo_ontem_fv = consumo_ontem_fv * preco_fv
-    custo_ontem_total = custo_ontem_vazio + custo_ontem_fv
+        consumo_ontem_vazio = r_ontem["vazio"] - r_ant["vazio"]
+        consumo_ontem_fv = r_ontem["fv"] - r_ant["fv"]
+        consumo_ontem_total = consumo_ontem_vazio + consumo_ontem_fv
 
-    # Acumulado do mês = diferença entre ontem e o dia anterior ao 1º dia do mês
-    acumulado_vazio = 0
-    acumulado_fv = 0
+        custo_ontem_vazio = consumo_ontem_vazio * preco_vazio
+        custo_ontem_fv = consumo_ontem_fv * preco_fv
+        custo_ontem_total = custo_ontem_vazio + custo_ontem_fv
+
+        tem_dados_ontem = True
+
+    primeiro_dia_mes = ultima_data.replace(day=1)
+
+    acumulado_vazio = 0.0
+    acumulado_fv = 0.0
 
     if primeiro_dia_mes in by_date and (primeiro_dia_mes - timedelta(days=1)) in by_date:
+        r_fim = by_date[ultima_data]
         r_inicio = by_date[primeiro_dia_mes - timedelta(days=1)]
-        acumulado_vazio = r_ontem["vazio"] - r_inicio["vazio"]
-        acumulado_fv = r_ontem["fv"] - r_inicio["fv"]
+
+        acumulado_vazio = r_fim["vazio"] - r_inicio["vazio"]
+        acumulado_fv = r_fim["fv"] - r_inicio["fv"]
     else:
-        # fallback: soma diferenças diárias disponíveis desde o 1º dia do mês
-        datas_mes = [d for d in sorted(by_date.keys()) if primeiro_dia_mes <= d <= ontem]
+        datas_mes = [d for d in datas if primeiro_dia_mes <= d <= ultima_data]
         for d in datas_mes:
             d_ant = d - timedelta(days=1)
             if d_ant in by_date:
@@ -170,7 +191,9 @@ def calculate_consumption_costs(rows: list[dict], preco_vazio: float, preco_fv: 
     custo_mes_total = custo_mes_vazio + custo_mes_fv
 
     return {
+        "tem_dados_ontem": tem_dados_ontem,
         "data_ontem": ontem.strftime("%d/%m/%Y"),
+        "ultima_atualizacao": ultima_data.strftime("%d/%m/%Y"),
         "consumo_ontem_vazio": round(consumo_ontem_vazio, 2),
         "consumo_ontem_fv": round(consumo_ontem_fv, 2),
         "consumo_ontem_total": round(consumo_ontem_total, 2),
@@ -199,7 +222,7 @@ def build_message(prices: dict, consumos: dict | None) -> str:
         f"• Fora vazio: {prices['PRECO_FV']} €/kWh",
     ]
 
-    if consumos:
+    if consumos and consumos.get("tem_dados_ontem"):
         parts.extend([
             "",
             f"📊 Consumos de ontem ({consumos['data_ontem']})",
@@ -211,17 +234,24 @@ def build_message(prices: dict, consumos: dict | None) -> str:
             f"• Vazio: {consumos['custo_ontem_vazio']} €",
             f"• Fora vazio: {consumos['custo_ontem_fv']} €",
             f"• Total: {consumos['custo_ontem_total']} €",
-            "",
-            "📆 Acumulado do mês",
-            f"• Vazio: {consumos['acumulado_vazio']} kWh",
-            f"• Fora vazio: {consumos['acumulado_fv']} kWh",
-            f"• Total: {consumos['acumulado_total']} kWh",
-            "",
-            "💶 Acumulado estimado",
-            f"• Vazio: {consumos['custo_mes_vazio']} €",
-            f"• Fora vazio: {consumos['custo_mes_fv']} €",
-            f"• Total: {consumos['custo_mes_total']} €",
         ])
+
+    ultima = "sem dados"
+    if consumos and consumos.get("ultima_atualizacao"):
+        ultima = consumos["ultima_atualizacao"]
+
+    parts.extend([
+        "",
+        f"📆 Acumulado do mês (última atualização: {ultima})",
+        f"• Vazio: {consumos['acumulado_vazio'] if consumos else 0} kWh",
+        f"• Fora vazio: {consumos['acumulado_fv'] if consumos else 0} kWh",
+        f"• Total: {consumos['acumulado_total'] if consumos else 0} kWh",
+        "",
+        f"💶 Acumulado estimado (última atualização: {ultima})",
+        f"• Vazio: {consumos['custo_mes_vazio'] if consumos else 0} €",
+        f"• Fora vazio: {consumos['custo_mes_fv'] if consumos else 0} €",
+        f"• Total: {consumos['custo_mes_total'] if consumos else 0} €",
+    ])
 
     return "\n".join(parts)
 
@@ -259,7 +289,7 @@ def send_telegram(message: str) -> None:
 def main() -> None:
     now_pt = datetime.now(ZoneInfo("Europe/Lisbon"))
 
-    if now_pt.hour != 8:
+    if os.getenv("FORCE_RUN", "").lower() != "1" and now_pt.hour != 8:
         print(f"Skip - não são 08h em Portugal. Hora atual: {now_pt.strftime('%H:%M:%S')}")
         return
 
