@@ -3,9 +3,7 @@ name: G9 diário
 on:
   workflow_dispatch:
   schedule:
-    # 08:00 inverno (UTC)
     - cron: '0 8 * * *'
-    # 08:00 verão (UTC+1)
     - cron: '0 7 * * *'
 
 jobs:
@@ -30,6 +28,6 @@ jobs:
           GGS: ${{ secrets.GGS }}
           TAR_VAZIO: ${{ secrets.TAR_VAZIO }}
           TAR_FV: ${{ secrets.TAR_FV }}
-          PERC_VAZIO: ${{ secrets.PERC_VAZIO }}
-          PERC_FV: ${{ secrets.PERC_FV }}
+          EREDES_CSV_URL: ${{ secrets.EREDES_CSV_URL }}
+          FORCE_RUN: 1
         run: python main.py
