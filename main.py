@@ -266,9 +266,8 @@ def send_telegram(message: str) -> None:
     url = f"{TELEGRAM_API}/bot{token}/sendMessage"
 
     data = {
-        "chat_id": chat_id,
+        "chat_id": str(chat_id).strip(),
         "text": message,
-        "parse_mode": "HTML"
     }
 
     encoded = urllib.parse.urlencode(data).encode("utf-8")
@@ -276,20 +275,22 @@ def send_telegram(message: str) -> None:
     req = urllib.request.Request(
         url,
         data=encoded,
-        headers={"Content-Type": "application/x-www-form-urlencoded"},
-        method="POST"
+        headers={"Content-Type": "application/x-www-form-urlencoded; charset=utf-8"},
+        method="POST",
     )
 
     try:
         with urllib.request.urlopen(req, timeout=30) as resp:
             response_text = resp.read().decode("utf-8", errors="replace")
-            response_json = json.loads(response_text)
+            print("Telegram response:", response_text)
 
+            response_json = json.loads(response_text)
             if not response_json.get("ok"):
                 raise RuntimeError(f"Erro Telegram: {response_text}")
 
     except urllib.error.HTTPError as e:
         error_body = e.read().decode("utf-8", errors="replace")
+        print("Telegram error body:", error_body)
         raise RuntimeError(f"Erro Telegram HTTP {e.code}: {error_body}")
 
 
