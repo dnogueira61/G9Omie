@@ -36,7 +36,6 @@ def extract_omie_mwh(html: str) -> float:
         r"Preco medio Portugal\s*([0-9]+,[0-9]+)\s*€/MWh",
         r"Preço médio Portugal\s*([0-9]+,[0-9]+)\s*€/MWh",
         r"Preco médio Portugal\s*([0-9]+,[0-9]+)\s*€/MWh",
-        r"Portugal[\s\S]{0,200}?([0-9]+,[0-9]+)\s*€/MWh",
     ]
 
     for pattern in patterns:
@@ -44,9 +43,7 @@ def extract_omie_mwh(html: str) -> float:
         if match:
             return float(match.group(1).replace(",", "."))
 
-    snippet_start = text.find("Portugal")
-    snippet = text[snippet_start:snippet_start + 500] if snippet_start != -1 else text[:500]
-    raise RuntimeError(f"Não foi possível extrair o OMIE do HTML. Trecho: {snippet}")
+    raise RuntimeError("Não foi possível extrair o OMIE do HTML.")
 
 
 def calculate(omie_mwh: float) -> dict:
