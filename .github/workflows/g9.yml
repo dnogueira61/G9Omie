@@ -1,0 +1,35 @@
+name: G9 diário
+
+on:
+  workflow_dispatch:
+  schedule:
+    # 09:00 Europe/Lisbon
+    - cron: '0 9 * * *'
+      timezone: 'Europe/Lisbon'
+
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Run script
+        env:
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          PERDAS: ${{ secrets.PERDAS }}
+          FADEQ: ${{ secrets.FADEQ }}
+          AC: ${{ secrets.AC }}
+          GGS: ${{ secrets.GGS }}
+          TAR_VAZIO: ${{ secrets.TAR_VAZIO }}
+          TAR_FV: ${{ secrets.TAR_FV }}
+          PERC_VAZIO: ${{ secrets.PERC_VAZIO }}
+          PERC_FV: ${{ secrets.PERC_FV }}
+          PRECO_FIXO_REF: ${{ secrets.PRECO_FIXO_REF }}
+        run: python main.py
