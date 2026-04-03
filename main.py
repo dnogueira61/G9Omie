@@ -7,7 +7,7 @@ import urllib.parse
 import urllib.error
 from io import StringIO
 from html import unescape
-from datetime import datetime, timedelta, time
+from datetime import datetime, timedelta, time, date
 from zoneinfo import ZoneInfo
 
 
@@ -28,7 +28,6 @@ def normalize_google_sheets_csv_url(url: str) -> str:
     if not url:
         return url
 
-    # Se já for um link CSV/GVIZ pronto, não mexe
     if "gviz/tq" in url or "export?format=csv" in url:
         return url
 
@@ -54,7 +53,7 @@ def fetch_text(url: str) -> str:
         url,
         headers={
             "User-Agent": "Mozilla/5.0",
-            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,text/csv,*/*;q=0.8",
+            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,text/csv,text/plain,*/*;q=0.8",
         },
     )
 
@@ -184,24 +183,8 @@ def pick_column(fieldnames: list[str], candidates: list[str]) -> str | None:
     return None
 
 
-def is_summer_time_portugal(d: datetime.date) -> bool:
-    # Aproximação robusta com timezone local:
-    # compara offset do meio-dia local nessa data
-    local_dt = datetime(d.year, d.month, d.day, 12, 0, tzinfo=TZ)
-    return local_dt.dst() != timedelta(0)
-
-
 def is_vazio(dt_local: datetime) -> bool:
-    """
-    Regra default para bi-horário ciclo diário:
-    - inverno: 22:00 -> 08:00
-    - verão:   23:00 -> 09:00
-
-    Se precisares de outro ciclo, depois ajustamos.
-    """
     t = dt_local.time()
-    if is_summer_time_portugal(dt_local.date()):
-        return t >= time(23, 0) or t < time(9, 0)
     return t >= time(22, 0) or t < time(8, 0)
 
 
@@ -258,21 +241,20 @@ def load_eredes_15m_data() -> list[dict]:
         return []
 
     rows = []
-
     for idx, row in enumerate(reader, start=1):
-        data = parse_date_multi(row.get(col_data, ""))
-        hora = parse_time_multi(row.get(col_hora, ""))
+        d = parse_date_multi(row.get(col_data, ""))
+        h = parse_time_multi(row.get(col_hora, ""))
         consumo = to_float(row.get(col_consumo, "0"))
         estado = (row.get(col_estado, "") or "").strip() if col_estado else ""
 
-        if not data or not hora:
+        if not d or not h:
             continue
 
-        dt_local = datetime.combine(data, hora).replace(tzinfo=TZ)
+        dt_local = datetime.combine(d, h).replace(tzinfo=TZ)
 
         rows.append({
-            "date": data,
-            "time": hora,
+            "date": d,
+            "time": h,
             "datetime": dt_local,
             "consumo": consumo,
             "estado": estado,
@@ -287,7 +269,97 @@ def load_eredes_15m_data() -> list[dict]:
     return rows
 
 
-def calculate_consumption_costs(rows: list[dict], preco_vazio: float, preco_fv: float) -> dict:
+def omie_file_url_for_date(target_date: date) -> str:
+    ymd = target_date.strftime("%Y%m%d")
+    return (
+        f"https://www.omie.es/es/file-download?parents%5B0%5D=marginalpdbcpt"
+        f"&filename=marginalpdbcpt_{ymd}.1"
+    )
+
+
+def parse_omie_decimal(value: str) -> float:
+    value = (value or "").strip()
+    if not value:
+        return 0.0
+    return float(value.replace(".", "").replace(",", "."))
+
+
+def load_omie_day_prices(target_date: date) -> dict[int, float]:
+    """
+    Devolve dict {hora_inicio: preco_eur_kwh}
+    Exemplo:
+      0 -> preço da hora 00:00-01:00
+      1 -> preço da hora 01:00-02:00
+    """
+    url = omie_file_url_for_date(target_date)
+    print(f"DEBUG OMIE URL: {url}")
+    raw = fetch_text(url)
+
+    lines = [line.strip() for line in raw.splitlines() if line.strip()]
+    print("DEBUG OMIE primeiras linhas:")
+    for line in lines[:10]:
+        print(repr(line))
+
+    prices_mwh: dict[int, float] = {}
+
+    for line in lines:
+        # Normalmente vem algo tipo:
+        # 1;21,20
+        # ou com mais colunas; apanhamos a primeira coluna como hora e a última como preço
+        parts = [p.strip() for p in re.split(r"[;,\t]", line) if p.strip()]
+
+        # Tentativa 1: linha simples "1;21,20"
+        if ";" in line:
+            semi_parts = [p.strip() for p in line.split(";")]
+            if len(semi_parts) >= 2 and semi_parts[0].isdigit():
+                hour_num = int(semi_parts[0])
+                try:
+                    price_mwh = parse_omie_decimal(semi_parts[-1])
+                    if 1 <= hour_num <= 24:
+                        prices_mwh[hour_num - 1] = price_mwh
+                        continue
+                except Exception:
+                    pass
+
+        # Tentativa 2: procura padrão hora + preço no fim
+        m = re.match(r"^\s*(\d{1,2})\D+([0-9]+(?:[.,][0-9]+)?)\s*$", line)
+        if m:
+            hour_num = int(m.group(1))
+            price_mwh = parse_omie_decimal(m.group(2))
+            if 1 <= hour_num <= 24:
+                prices_mwh[hour_num - 1] = price_mwh
+
+    if len(prices_mwh) < 24:
+        raise RuntimeError(
+            f"Não foi possível ler 24 preços OMIE para {target_date}. Obtidos: {len(prices_mwh)}"
+        )
+
+    perdas = get_env_float("PERDAS", 0.15)
+    fadeq = get_env_float("FADEQ", 1.02)
+    ac = get_env_float("AC", 0.0055)
+    ggs = get_env_float("GGS", 0.0100)
+    tar_vazio = get_env_float("TAR_VAZIO", 0.0158)
+    tar_fv = get_env_float("TAR_FV", 0.0835)
+
+    prices_kwh: dict[int, float] = {}
+
+    for hour_start, omie_mwh in sorted(prices_mwh.items()):
+        omie_kwh = omie_mwh / 1000.0
+        base = (omie_kwh * fadeq * (1.0 + perdas)) + ac + ggs
+
+        # Aqui o custo real também respeita o teu período horário:
+        if 22 <= hour_start or hour_start < 8:
+            final_price = base + tar_vazio
+        else:
+            final_price = base + tar_fv
+
+        prices_kwh[hour_start] = final_price
+
+    print("DEBUG OMIE preços finais €/kWh (primeiras horas):", {k: round(v, 5) for k, v in list(prices_kwh.items())[:6]})
+    return prices_kwh
+
+
+def calculate_real_consumption_costs(rows: list[dict]) -> dict:
     hoje = datetime.now(TZ).date()
 
     base_empty = {
@@ -306,33 +378,54 @@ def calculate_consumption_costs(rows: list[dict], preco_vazio: float, preco_fv: 
         "custo_mes_vazio": 0.0,
         "custo_mes_fv": 0.0,
         "custo_mes_total": 0.0,
+        "preco_medio_ontem": 0.0,
+        "preco_medio_mes": 0.0,
     }
 
     if not rows:
         return base_empty
 
-    ontem = hoje - timedelta(days=1)
     ultima_data = max(r["date"] for r in rows)
     primeiro_dia_mes = ultima_data.replace(day=1)
+    ontem = hoje - timedelta(days=1)
 
-    rows_ontem = [r for r in rows if r["date"] == ontem]
+    # Carrega preços OMIE por cada dia presente no mês até à última atualização
+    unique_dates = sorted({r["date"] for r in rows if primeiro_dia_mes <= r["date"] <= ultima_data})
+    omie_by_date: dict[date, dict[int, float]] = {}
+
+    for d in unique_dates:
+        try:
+            omie_by_date[d] = load_omie_day_prices(d)
+        except Exception as e:
+            print(f"ERRO ao carregar OMIE para {d}: {e}")
+            raise
+
     rows_mes = [r for r in rows if primeiro_dia_mes <= r["date"] <= ultima_data]
+    rows_ontem = [r for r in rows if r["date"] == ontem]
+
+    def enrich_cost(row: dict) -> float:
+        hour_start = row["datetime"].hour
+        price = omie_by_date[row["date"]][hour_start]
+        return row["consumo"] * price
 
     consumo_ontem_vazio = sum(r["consumo"] for r in rows_ontem if r["is_vazio"])
     consumo_ontem_fv = sum(r["consumo"] for r in rows_ontem if not r["is_vazio"])
     consumo_ontem_total = consumo_ontem_vazio + consumo_ontem_fv
 
+    custo_ontem_vazio = sum(enrich_cost(r) for r in rows_ontem if r["is_vazio"])
+    custo_ontem_fv = sum(enrich_cost(r) for r in rows_ontem if not r["is_vazio"])
+    custo_ontem_total = custo_ontem_vazio + custo_ontem_fv
+
     acumulado_vazio = sum(r["consumo"] for r in rows_mes if r["is_vazio"])
     acumulado_fv = sum(r["consumo"] for r in rows_mes if not r["is_vazio"])
     acumulado_total = acumulado_vazio + acumulado_fv
 
-    custo_ontem_vazio = consumo_ontem_vazio * preco_vazio
-    custo_ontem_fv = consumo_ontem_fv * preco_fv
-    custo_ontem_total = custo_ontem_vazio + custo_ontem_fv
-
-    custo_mes_vazio = acumulado_vazio * preco_vazio
-    custo_mes_fv = acumulado_fv * preco_fv
+    custo_mes_vazio = sum(enrich_cost(r) for r in rows_mes if r["is_vazio"])
+    custo_mes_fv = sum(enrich_cost(r) for r in rows_mes if not r["is_vazio"])
     custo_mes_total = custo_mes_vazio + custo_mes_fv
+
+    preco_medio_ontem = (custo_ontem_total / consumo_ontem_total) if consumo_ontem_total > 0 else 0.0
+    preco_medio_mes = (custo_mes_total / acumulado_total) if acumulado_total > 0 else 0.0
 
     return {
         "tem_dados_ontem": len(rows_ontem) > 0,
@@ -350,6 +443,8 @@ def calculate_consumption_costs(rows: list[dict], preco_vazio: float, preco_fv: 
         "custo_mes_vazio": round(custo_mes_vazio, 2),
         "custo_mes_fv": round(custo_mes_fv, 2),
         "custo_mes_total": round(custo_mes_total, 2),
+        "preco_medio_ontem": round(preco_medio_ontem, 3),
+        "preco_medio_mes": round(preco_medio_mes, 3),
     }
 
 
@@ -374,10 +469,11 @@ def build_message(prices: dict, consumos: dict | None) -> str:
             f"• Fora vazio: {consumos['consumo_ontem_fv']} kWh",
             f"• Total: {consumos['consumo_ontem_total']} kWh",
             "",
-            "💰 Custos de ontem",
+            "💰 Custos reais de ontem",
             f"• Vazio: {consumos['custo_ontem_vazio']} €",
             f"• Fora vazio: {consumos['custo_ontem_fv']} €",
             f"• Total: {consumos['custo_ontem_total']} €",
+            f"• Preço médio real: {consumos['preco_medio_ontem']} €/kWh",
         ])
 
     ultima = "sem dados"
@@ -391,10 +487,11 @@ def build_message(prices: dict, consumos: dict | None) -> str:
         f"• Fora vazio: {consumos['acumulado_fv'] if consumos else 0} kWh",
         f"• Total: {consumos['acumulado_total'] if consumos else 0} kWh",
         "",
-        f"💶 Acumulado estimado (última atualização: {ultima})",
+        f"💶 Acumulado real (última atualização: {ultima})",
         f"• Vazio: {consumos['custo_mes_vazio'] if consumos else 0} €",
         f"• Fora vazio: {consumos['custo_mes_fv'] if consumos else 0} €",
         f"• Total: {consumos['custo_mes_total'] if consumos else 0} €",
+        f"• Preço médio real: {consumos['preco_medio_mes'] if consumos else 0} €/kWh",
     ])
 
     return "\n".join(parts)
@@ -458,7 +555,7 @@ def main() -> None:
         print("Último datetime:", rows[-1]["datetime"])
     print("=== FIM DEBUG E-REDES ===")
 
-    consumos = calculate_consumption_costs(rows, prices["PRECO_VAZIO"], prices["PRECO_FV"])
+    consumos = calculate_real_consumption_costs(rows)
 
     message = build_message(prices, consumos)
 
