@@ -51,36 +51,18 @@ def calculate(omie_mwh: float) -> dict:
     tar_fv = get_env_float("TAR_FV", 0.0835)
     perc_vazio = get_env_float("PERC_VAZIO", 0.65)
     perc_fv = get_env_float("PERC_FV", 0.35)
-    preco_fixo_ref = get_env_float("PRECO_FIXO_REF", 0.134)
 
     omie_kwh = omie_mwh / 1000.0
     base = (omie_kwh * fadeq * (1.0 + perdas)) + ac + ggs
     preco_vazio = base + tar_vazio
     preco_fv = base + tar_fv
     preco_final = (preco_vazio * perc_vazio) + (preco_fv * perc_fv)
-    tar_media = (tar_vazio * perc_vazio) + (tar_fv * perc_fv)
-    breakeven_num = ((preco_fixo_ref - ac - ggs - tar_media) / (fadeq * (1.0 + perdas))) * 1000.0
 
-    if breakeven_num <= 0:
-        breakeven_txt = "≤ 0 €/MWh"
-    else:
-        breakeven_txt = f"{breakeven_num:.1f} €/MWh"
-
-    if preco_final < preco_fixo_ref:
-        decisao = "✅ Indexado abaixo do preço de referência"
-    elif abs(preco_final - preco_fixo_ref) < 1e-9:
-        decisao = "➖ Empate com o preço de referência"
-    else:
-        decisao = "⚠️ Indexado acima do preço de referência"
-
-    return {
+       return {
         "OMIE_MWh": round(omie_mwh, 1),
         "PRECO_VAZIO": round(preco_vazio, 3),
         "PRECO_FV": round(preco_fv, 3),
         "PRECO_FINAL": round(preco_final, 3),
-        "PRECO_FIXO_REF": round(preco_fixo_ref, 3),
-        "BREAKEVEN_TXT": breakeven_txt,
-        "DECISAO": decisao,
     }
 
 
@@ -91,12 +73,7 @@ def build_message(data: dict) -> str:
         "⚡ G9 estimado\n"
         f"• Vazio: {data['PRECO_VAZIO']} €/kWh\n"
         f"• Fora vazio: {data['PRECO_FV']} €/kWh\n"
-        f"• Médio: {data['PRECO_FINAL']} €/kWh\n\n"
-        "🎯 Break-even\n"
-        f"• {data['BREAKEVEN_TXT']}\n\n"
-        "📌 Referência fixa\n"
-        f"• {data['PRECO_FIXO_REF']} €/kWh\n\n"
-        f"{data['DECISAO']}"
+        f"• Médio: {data['PRECO_FINAL']} €/kWh"
     )
 
 
