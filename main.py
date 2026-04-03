@@ -53,17 +53,20 @@ def calculate(omie_mwh: float) -> dict:
     perc_fv = get_env_float("PERC_FV", 0.35)
 
     omie_kwh = omie_mwh / 1000.0
-    base = (omie_kwh * fadeq * (1.0 + perdas)) + ac + ggs
-    preco_vazio = base + tar_vazio
-    preco_fv = base + tar_fv
-    preco_final = (preco_vazio * perc_vazio) + (preco_fv * perc_fv)
 
-       return {
-        "OMIE_MWh": round(omie_mwh, 1),
-        "PRECO_VAZIO": round(preco_vazio, 3),
-        "PRECO_FV": round(preco_fv, 3),
-        "PRECO_FINAL": round(preco_final, 3),
-    }
+base = (omie_kwh * fadeq * (1.0 + perdas)) + ac + ggs
+
+preco_vazio = base + tar_vazio
+preco_fv = base + tar_fv
+
+preco_final = (preco_vazio * perc_vazio) + (preco_fv * perc_fv)
+
+return {
+    "OMIE_MWh": round(omie_mwh, 1),
+    "PRECO_VAZIO": round(preco_vazio, 3),
+    "PRECO_FV": round(preco_fv, 3),
+    "PRECO_FINAL": round(preco_final, 3),
+}
 
 
 def build_message(data: dict) -> str:
