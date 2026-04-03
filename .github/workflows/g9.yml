@@ -31,5 +31,4 @@ jobs:
           TAR_FV: ${{ secrets.TAR_FV }}
           PERC_VAZIO: ${{ secrets.PERC_VAZIO }}
           PERC_FV: ${{ secrets.PERC_FV }}
-          PRECO_FIXO_REF: ${{ secrets.PRECO_FIXO_REF }}
         run: python main.py
