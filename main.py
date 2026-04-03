@@ -97,7 +97,26 @@ def load_eredes_data() -> list[dict]:
         return []
 
     csv_text = fetch_text(url)
-    reader = csv.DictReader(StringIO(csv_text))
+    lines = csv_text.splitlines()
+
+    header_index = None
+    for i, line in enumerate(lines):
+        line_norm = line.strip().lower()
+        if (
+            "data da leitura" in line_norm
+            and "vazio" in line_norm
+            and "ponta" in line_norm
+            and "cheias" in line_norm
+        ):
+            header_index = i
+            break
+
+    if header_index is None:
+        print("Cabeçalho da E-REDES não encontrado no CSV.")
+        return []
+
+    cleaned_csv = "\n".join(lines[header_index:])
+    reader = csv.DictReader(StringIO(cleaned_csv))
     rows = []
 
     for row in reader:
@@ -306,10 +325,23 @@ def main() -> None:
     prices = calculate_prices(omie_mwh)
 
     rows = load_eredes_data()
+
+    print("=== DEBUG E-REDES ===")
+    print("Nº de linhas lidas:", len(rows))
+    if rows:
+        print("Primeira data:", rows[0]["date"])
+        print("Última data:", rows[-1]["date"])
+    print("=== FIM DEBUG E-REDES ===")
+
     consumos = calculate_consumption_costs(rows, prices["PRECO_VAZIO"], prices["PRECO_FV"])
 
     message = build_message(prices, consumos)
+
+    print("=== CHAT ID ===", os.getenv("TELEGRAM_CHAT_ID"))
+    print("=== MESSAGE ===")
     print(message)
+    print("=== END MESSAGE ===")
+
     send_telegram(message)
 
 
