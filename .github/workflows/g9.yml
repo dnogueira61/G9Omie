@@ -30,4 +30,5 @@ jobs:
           TAR_VAZIO: ${{ secrets.TAR_VAZIO }}
           TAR_FV: ${{ secrets.TAR_FV }}
           EREDES_CSV_URL: ${{ secrets.EREDES_CSV_URL }}
+          FORCE_RUN: 1
         run: python main.py
