@@ -30,16 +30,23 @@ def fetch_text(url: str) -> str:
 
 def extract_omie_mwh(html: str) -> float:
     text = unescape(html)
+
     patterns = [
-        r"Portugal\s*-\s*Simples[\s\S]*?([0-9]+,[0-9]+)\s*€",
-        r"Portugal\s*-\s*Simple[s]?[\s\S]*?([0-9]+,[0-9]+)\s*€",
-        r"Portugal[\s\S]{0,500}?([0-9]+,[0-9]+)\s*€",
+        r"Preço medio Portugal\s*([0-9]+,[0-9]+)\s*€/MWh",
+        r"Preco medio Portugal\s*([0-9]+,[0-9]+)\s*€/MWh",
+        r"Preço médio Portugal\s*([0-9]+,[0-9]+)\s*€/MWh",
+        r"Preco médio Portugal\s*([0-9]+,[0-9]+)\s*€/MWh",
+        r"Portugal[\s\S]{0,200}?([0-9]+,[0-9]+)\s*€/MWh",
     ]
+
     for pattern in patterns:
         match = re.search(pattern, text, re.IGNORECASE)
         if match:
             return float(match.group(1).replace(",", "."))
-    raise RuntimeError("Não foi possível extrair o OMIE do HTML.")
+
+    snippet_start = text.find("Portugal")
+    snippet = text[snippet_start:snippet_start + 500] if snippet_start != -1 else text[:500]
+    raise RuntimeError(f"Não foi possível extrair o OMIE do HTML. Trecho: {snippet}")
 
 
 def calculate(omie_mwh: float) -> dict:
