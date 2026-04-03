@@ -28,6 +28,10 @@ def normalize_google_sheets_csv_url(url: str) -> str:
     if not url:
         return url
 
+    # Se já for um link CSV/GVIZ pronto, não mexe
+    if "gviz/tq" in url or "export?format=csv" in url:
+        return url
+
     if "docs.google.com/spreadsheets" not in url:
         return url
 
@@ -44,6 +48,7 @@ def normalize_google_sheets_csv_url(url: str) -> str:
 
 def fetch_text(url: str) -> str:
     url = normalize_google_sheets_csv_url(url)
+    print(f"DEBUG fetch_text URL final: {url}")
 
     req = urllib.request.Request(
         url,
@@ -53,11 +58,16 @@ def fetch_text(url: str) -> str:
         },
     )
 
-    with urllib.request.urlopen(req, timeout=30) as resp:
-        body = resp.read().decode("utf-8-sig", errors="replace")
-        print(f"DEBUG fetch_text URL: {url}")
-        print(f"DEBUG fetch_text first 300 chars: {body[:300]!r}")
-        return body
+    try:
+        with urllib.request.urlopen(req, timeout=30) as resp:
+            body = resp.read().decode("utf-8-sig", errors="replace")
+            print(f"DEBUG fetch_text first 300 chars: {body[:300]!r}")
+            return body
+    except urllib.error.HTTPError as e:
+        error_body = e.read().decode("utf-8", errors="replace")
+        print(f"DEBUG fetch_text HTTPError URL: {url}")
+        print(f"DEBUG fetch_text HTTPError body: {error_body}")
+        raise
 
 
 def extract_omie_mwh(html: str) -> float:
