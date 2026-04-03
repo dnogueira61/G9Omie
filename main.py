@@ -4,6 +4,8 @@ import json
 import urllib.request
 import urllib.parse
 from html import unescape
+from datetime import datetime
+from zoneinfo import ZoneInfo
 
 OMIE_URL = "https://www.omie.es/pt/spot-hoy"
 TELEGRAM_API = "https://api.telegram.org"
@@ -59,38 +61,36 @@ def calculate(omie_mwh: float) -> dict:
     ggs = get_env_float("GGS", 0.0100)
     tar_vazio = get_env_float("TAR_VAZIO", 0.0158)
     tar_fv = get_env_float("TAR_FV", 0.0835)
-    perc_vazio = get_env_float("PERC_VAZIO", 0.65)
-    perc_fv = get_env_float("PERC_FV", 0.35)
 
     omie_kwh = omie_mwh / 1000.0
     base = (omie_kwh * fadeq * (1.0 + perdas)) + ac + ggs
 
     preco_vazio = base + tar_vazio
     preco_fv = base + tar_fv
-    preco_final = (preco_vazio * perc_vazio) + (preco_fv * perc_fv)
 
     return {
         "OMIE_MWh": round(omie_mwh, 1),
         "PRECO_VAZIO": round(preco_vazio, 3),
         "PRECO_FV": round(preco_fv, 3),
-        "PRECO_FINAL": round(preco_final, 3),
     }
 
 
 def build_message(data: dict) -> str:
+    hoje_pt = datetime.now(ZoneInfo("Europe/Lisbon")).strftime("%d/%m/%Y")
+
     return (
-        "📅 Atualização diária G9\n\n"
+        f"📅 G9 - DATA {hoje_pt}\n\n"
         f"OMIE: {data['OMIE_MWh']} €/MWh\n\n"
         "⚡ G9 estimado\n"
         f"• Vazio: {data['PRECO_VAZIO']} €/kWh\n"
-        f"• Fora vazio: {data['PRECO_FV']} €/kWh\n"
-        f"• Médio: {data['PRECO_FINAL']} €/kWh"
+        f"• Fora vazio: {data['PRECO_FV']} €/kWh"
     )
 
 
 def send_telegram(message: str) -> None:
     token = os.getenv("TELEGRAM_BOT_TOKEN")
     chat_id = os.getenv("TELEGRAM_CHAT_ID")
+
     if not token or not chat_id:
         raise RuntimeError("Faltam TELEGRAM_BOT_TOKEN ou TELEGRAM_CHAT_ID.")
 
@@ -105,18 +105,31 @@ def send_telegram(message: str) -> None:
         headers={"Content-Type": "application/x-www-form-urlencoded"},
         method="POST",
     )
-    with urllib.request.urlopen(req, timeout=30) as resp:
-        response_text = resp.read().decode("utf-8", errors="replace")
-        response_json = json.loads(response_text)
-        if not response_json.get("ok"):
-            raise RuntimeError(f"Erro Telegram: {response_text}")
+
+    try:
+        with urllib.request.urlopen(req, timeout=30) as resp:
+            response_text = resp.read().decode("utf-8", errors="replace")
+            response_json = json.loads(response_text)
+            if not response_json.get("ok"):
+                raise RuntimeError(f"Erro Telegram: {response_text}")
+    except urllib.error.HTTPError as e:
+        error_body = e.read().decode("utf-8", errors="replace")
+        raise RuntimeError(f"Erro Telegram HTTP {e.code}: {error_body}")
 
 
 def main() -> None:
+    now_pt = datetime.now(ZoneInfo("Europe/Lisbon"))
+
+    # só envia às 08:00 em Portugal
+    if now_pt.hour != 8:
+        print(f"Skip - não são 08h em Portugal. Hora atual: {now_pt.strftime('%H:%M:%S')}")
+        return
+
     html = fetch_text(OMIE_URL)
     omie_mwh = extract_omie_mwh(html)
     data = calculate(omie_mwh)
     message = build_message(data)
+
     print(message)
     send_telegram(message)
 
