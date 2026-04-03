@@ -31,6 +31,12 @@ def fetch_text(url: str) -> str:
 def extract_omie_mwh(html: str) -> float:
     text = unescape(html)
 
+    # remover tags HTML
+    text = re.sub(r"<[^>]+>", " ", text)
+
+    # normalizar espaços
+    text = re.sub(r"\s+", " ", text).strip()
+
     patterns = [
         r"Preço medio Portugal\s*([0-9]+,[0-9]+)\s*€/MWh",
         r"Preco medio Portugal\s*([0-9]+,[0-9]+)\s*€/MWh",
@@ -43,7 +49,7 @@ def extract_omie_mwh(html: str) -> float:
         if match:
             return float(match.group(1).replace(",", "."))
 
-    raise RuntimeError("Não foi possível extrair o OMIE do HTML.")
+    raise RuntimeError(f"Não foi possível extrair o OMIE do HTML. Trecho: {text[:500]}")
 
 
 def calculate(omie_mwh: float) -> dict:
