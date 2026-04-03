@@ -7,11 +7,13 @@ import urllib.parse
 import urllib.error
 from io import StringIO
 from html import unescape
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, time
 from zoneinfo import ZoneInfo
+
 
 OMIE_URL = "https://www.omie.es/pt/spot-hoy"
 TELEGRAM_API = "https://api.telegram.org"
+TZ = ZoneInfo("Europe/Lisbon")
 
 
 def get_env_float(name: str, default: float) -> float:
@@ -21,16 +23,41 @@ def get_env_float(name: str, default: float) -> float:
     return float(value)
 
 
+def normalize_google_sheets_csv_url(url: str) -> str:
+    url = (url or "").strip()
+    if not url:
+        return url
+
+    if "docs.google.com/spreadsheets" not in url:
+        return url
+
+    gid_match = re.search(r"[#?&]gid=(\d+)", url)
+    gid = gid_match.group(1) if gid_match else "0"
+
+    sheet_match = re.search(r"/spreadsheets/d/([a-zA-Z0-9-_]+)", url)
+    if not sheet_match:
+        return url
+
+    sheet_id = sheet_match.group(1)
+    return f"https://docs.google.com/spreadsheets/d/{sheet_id}/export?format=csv&gid={gid}"
+
+
 def fetch_text(url: str) -> str:
+    url = normalize_google_sheets_csv_url(url)
+
     req = urllib.request.Request(
         url,
         headers={
             "User-Agent": "Mozilla/5.0",
-            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8,text/csv,*/*;q=0.7",
+            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,text/csv,*/*;q=0.8",
         },
     )
+
     with urllib.request.urlopen(req, timeout=30) as resp:
-        return resp.read().decode("utf-8", errors="replace")
+        body = resp.read().decode("utf-8-sig", errors="replace")
+        print(f"DEBUG fetch_text URL: {url}")
+        print(f"DEBUG fetch_text first 300 chars: {body[:300]!r}")
+        return body
 
 
 def extract_omie_mwh(html: str) -> float:
@@ -74,9 +101,9 @@ def calculate_prices(omie_mwh: float) -> dict:
     }
 
 
-def parse_date_pt(value: str):
+def parse_date_multi(value: str):
     value = (value or "").strip()
-    for fmt in ("%d/%m/%Y", "%d-%m-%Y"):
+    for fmt in ("%Y/%m/%d", "%Y-%m-%d", "%d/%m/%Y", "%d-%m-%Y"):
         try:
             return datetime.strptime(value, fmt).date()
         except ValueError:
@@ -84,144 +111,232 @@ def parse_date_pt(value: str):
     return None
 
 
-def to_int(value: str) -> int:
-    value = (value or "").strip().replace(".", "").replace(",", ".")
+def parse_time_multi(value: str):
+    value = (value or "").strip()
+    for fmt in ("%H:%M", "%H:%M:%S"):
+        try:
+            return datetime.strptime(value, fmt).time()
+        except ValueError:
+            pass
+    return None
+
+
+def to_float(value: str) -> float:
+    value = (value or "").strip().replace("\xa0", "").replace(" ", "")
     if value == "":
-        return 0
-    return int(float(value))
+        return 0.0
+
+    if "," in value and "." in value:
+        value = value.replace(".", "").replace(",", ".")
+    elif "," in value:
+        value = value.replace(",", ".")
+
+    try:
+        return float(value)
+    except ValueError:
+        return 0.0
 
 
-def load_eredes_data() -> list[dict]:
+def normalize_header_name(name: str) -> str:
+    name = (name or "").strip().lstrip("\ufeff")
+    name = re.sub(r"\s+", " ", name)
+    return name.lower()
+
+
+def detect_csv_delimiter(sample_text: str) -> str:
+    first_lines = "\n".join(sample_text.splitlines()[:10])
+    semicolons = first_lines.count(";")
+    commas = first_lines.count(",")
+    return ";" if semicolons > commas else ","
+
+
+def find_header_index(lines: list[str]) -> int | None:
+    for i, line in enumerate(lines):
+        line_norm = normalize_header_name(line)
+        if "data" in line_norm and "hora" in line_norm and "consumo" in line_norm:
+            return i
+    return None
+
+
+def pick_column(fieldnames: list[str], candidates: list[str]) -> str | None:
+    normalized_map = {normalize_header_name(f): f for f in fieldnames if f}
+
+    for candidate in candidates:
+        candidate_norm = normalize_header_name(candidate)
+        if candidate_norm in normalized_map:
+            return normalized_map[candidate_norm]
+
+    for norm_name, original_name in normalized_map.items():
+        for candidate in candidates:
+            if normalize_header_name(candidate) in norm_name:
+                return original_name
+
+    return None
+
+
+def is_summer_time_portugal(d: datetime.date) -> bool:
+    # Aproximação robusta com timezone local:
+    # compara offset do meio-dia local nessa data
+    local_dt = datetime(d.year, d.month, d.day, 12, 0, tzinfo=TZ)
+    return local_dt.dst() != timedelta(0)
+
+
+def is_vazio(dt_local: datetime) -> bool:
+    """
+    Regra default para bi-horário ciclo diário:
+    - inverno: 22:00 -> 08:00
+    - verão:   23:00 -> 09:00
+
+    Se precisares de outro ciclo, depois ajustamos.
+    """
+    t = dt_local.time()
+    if is_summer_time_portugal(dt_local.date()):
+        return t >= time(23, 0) or t < time(9, 0)
+    return t >= time(22, 0) or t < time(8, 0)
+
+
+def load_eredes_15m_data() -> list[dict]:
     url = os.getenv("EREDES_CSV_URL")
     if not url:
+        print("DEBUG E-REDES: variável EREDES_CSV_URL vazia.")
         return []
 
     csv_text = fetch_text(url)
     lines = csv_text.splitlines()
 
-    header_index = None
-    for i, line in enumerate(lines):
-        line_norm = line.strip().lower()
-        if (
-            "data da leitura" in line_norm
-            and "vazio" in line_norm
-            and "ponta" in line_norm
-            and "cheias" in line_norm
-        ):
-            header_index = i
-            break
+    if not lines:
+        print("DEBUG E-REDES: CSV vazio.")
+        return []
 
+    header_index = find_header_index(lines)
     if header_index is None:
-        print("Cabeçalho da E-REDES não encontrado no CSV.")
+        print("DEBUG E-REDES: cabeçalho Data/Hora/Consumo não encontrado.")
+        print("DEBUG primeiras 20 linhas:")
+        for line in lines[:20]:
+            print(repr(line))
         return []
 
     cleaned_csv = "\n".join(lines[header_index:])
-    reader = csv.DictReader(StringIO(cleaned_csv))
+    delimiter = detect_csv_delimiter(cleaned_csv)
+
+    print(f"DEBUG E-REDES: delimitador detetado = {delimiter!r}")
+    print(f"DEBUG E-REDES: header index = {header_index}")
+    print(f"DEBUG E-REDES: linha cabeçalho = {lines[header_index]!r}")
+
+    reader = csv.DictReader(StringIO(cleaned_csv), delimiter=delimiter)
+
+    if not reader.fieldnames:
+        print("DEBUG E-REDES: sem fieldnames.")
+        return []
+
+    print("DEBUG E-REDES: fieldnames =", reader.fieldnames)
+
+    col_data = pick_column(reader.fieldnames, ["Data"])
+    col_hora = pick_column(reader.fieldnames, ["Hora"])
+    col_consumo = pick_column(reader.fieldnames, ["Consumo"])
+    col_estado = pick_column(reader.fieldnames, ["Estado"])
+
+    print("DEBUG E-REDES: colunas escolhidas =", {
+        "data": col_data,
+        "hora": col_hora,
+        "consumo": col_consumo,
+        "estado": col_estado,
+    })
+
+    if not col_data or not col_hora or not col_consumo:
+        print("DEBUG E-REDES: faltam colunas obrigatórias.")
+        return []
+
     rows = []
 
-    for row in reader:
-        data_leitura = parse_date_pt(row.get("Data da Leitura", ""))
-        if not data_leitura:
+    for idx, row in enumerate(reader, start=1):
+        data = parse_date_multi(row.get(col_data, ""))
+        hora = parse_time_multi(row.get(col_hora, ""))
+        consumo = to_float(row.get(col_consumo, "0"))
+        estado = (row.get(col_estado, "") or "").strip() if col_estado else ""
+
+        if not data or not hora:
             continue
 
-        vazio = to_int(row.get("Vazio", "0"))
-        ponta = to_int(row.get("Ponta", "0"))
-        cheias = to_int(row.get("Cheias", "0"))
+        dt_local = datetime.combine(data, hora).replace(tzinfo=TZ)
 
         rows.append({
-            "date": data_leitura,
-            "vazio": vazio,
-            "ponta": ponta,
-            "cheias": cheias,
-            "fv": ponta + cheias,
+            "date": data,
+            "time": hora,
+            "datetime": dt_local,
+            "consumo": consumo,
+            "estado": estado,
+            "is_vazio": is_vazio(dt_local),
         })
 
-    rows.sort(key=lambda x: x["date"])
+        if idx <= 5:
+            print("DEBUG E-REDES sample raw row:", row)
+            print("DEBUG E-REDES parsed row:", rows[-1])
+
+    rows.sort(key=lambda x: x["datetime"])
     return rows
 
 
 def calculate_consumption_costs(rows: list[dict], preco_vazio: float, preco_fv: float) -> dict:
-    tz = ZoneInfo("Europe/Lisbon")
-    hoje = datetime.now(tz).date()
+    hoje = datetime.now(TZ).date()
+
+    base_empty = {
+        "tem_dados_ontem": False,
+        "data_ontem": (hoje - timedelta(days=1)).strftime("%d/%m/%Y"),
+        "ultima_atualizacao": None,
+        "consumo_ontem_vazio": 0.0,
+        "consumo_ontem_fv": 0.0,
+        "consumo_ontem_total": 0.0,
+        "custo_ontem_vazio": 0.0,
+        "custo_ontem_fv": 0.0,
+        "custo_ontem_total": 0.0,
+        "acumulado_vazio": 0.0,
+        "acumulado_fv": 0.0,
+        "acumulado_total": 0.0,
+        "custo_mes_vazio": 0.0,
+        "custo_mes_fv": 0.0,
+        "custo_mes_total": 0.0,
+    }
 
     if not rows:
-        return {
-            "tem_dados_ontem": False,
-            "ultima_atualizacao": None,
-            "acumulado_vazio": 0.0,
-            "acumulado_fv": 0.0,
-            "acumulado_total": 0.0,
-            "custo_mes_vazio": 0.0,
-            "custo_mes_fv": 0.0,
-            "custo_mes_total": 0.0,
-        }
-
-    by_date = {r["date"]: r for r in rows}
-    datas = sorted(by_date.keys())
-    ultima_data = datas[-1]
-
-    tem_dados_ontem = False
-    consumo_ontem_vazio = 0.0
-    consumo_ontem_fv = 0.0
-    consumo_ontem_total = 0.0
-    custo_ontem_vazio = 0.0
-    custo_ontem_fv = 0.0
-    custo_ontem_total = 0.0
+        return base_empty
 
     ontem = hoje - timedelta(days=1)
-
-    if ontem in by_date and (ontem - timedelta(days=1)) in by_date:
-        r_ontem = by_date[ontem]
-        r_ant = by_date[ontem - timedelta(days=1)]
-
-        consumo_ontem_vazio = r_ontem["vazio"] - r_ant["vazio"]
-        consumo_ontem_fv = r_ontem["fv"] - r_ant["fv"]
-        consumo_ontem_total = consumo_ontem_vazio + consumo_ontem_fv
-
-        custo_ontem_vazio = consumo_ontem_vazio * preco_vazio
-        custo_ontem_fv = consumo_ontem_fv * preco_fv
-        custo_ontem_total = custo_ontem_vazio + custo_ontem_fv
-
-        tem_dados_ontem = True
-
+    ultima_data = max(r["date"] for r in rows)
     primeiro_dia_mes = ultima_data.replace(day=1)
 
-    acumulado_vazio = 0.0
-    acumulado_fv = 0.0
+    rows_ontem = [r for r in rows if r["date"] == ontem]
+    rows_mes = [r for r in rows if primeiro_dia_mes <= r["date"] <= ultima_data]
 
-    if primeiro_dia_mes in by_date and (primeiro_dia_mes - timedelta(days=1)) in by_date:
-        r_fim = by_date[ultima_data]
-        r_inicio = by_date[primeiro_dia_mes - timedelta(days=1)]
+    consumo_ontem_vazio = sum(r["consumo"] for r in rows_ontem if r["is_vazio"])
+    consumo_ontem_fv = sum(r["consumo"] for r in rows_ontem if not r["is_vazio"])
+    consumo_ontem_total = consumo_ontem_vazio + consumo_ontem_fv
 
-        acumulado_vazio = r_fim["vazio"] - r_inicio["vazio"]
-        acumulado_fv = r_fim["fv"] - r_inicio["fv"]
-    else:
-        datas_mes = [d for d in datas if primeiro_dia_mes <= d <= ultima_data]
-        for d in datas_mes:
-            d_ant = d - timedelta(days=1)
-            if d_ant in by_date:
-                acumulado_vazio += by_date[d]["vazio"] - by_date[d_ant]["vazio"]
-                acumulado_fv += by_date[d]["fv"] - by_date[d_ant]["fv"]
-
+    acumulado_vazio = sum(r["consumo"] for r in rows_mes if r["is_vazio"])
+    acumulado_fv = sum(r["consumo"] for r in rows_mes if not r["is_vazio"])
     acumulado_total = acumulado_vazio + acumulado_fv
+
+    custo_ontem_vazio = consumo_ontem_vazio * preco_vazio
+    custo_ontem_fv = consumo_ontem_fv * preco_fv
+    custo_ontem_total = custo_ontem_vazio + custo_ontem_fv
 
     custo_mes_vazio = acumulado_vazio * preco_vazio
     custo_mes_fv = acumulado_fv * preco_fv
     custo_mes_total = custo_mes_vazio + custo_mes_fv
 
     return {
-        "tem_dados_ontem": tem_dados_ontem,
+        "tem_dados_ontem": len(rows_ontem) > 0,
         "data_ontem": ontem.strftime("%d/%m/%Y"),
         "ultima_atualizacao": ultima_data.strftime("%d/%m/%Y"),
-        "consumo_ontem_vazio": round(consumo_ontem_vazio, 2),
-        "consumo_ontem_fv": round(consumo_ontem_fv, 2),
-        "consumo_ontem_total": round(consumo_ontem_total, 2),
+        "consumo_ontem_vazio": round(consumo_ontem_vazio, 3),
+        "consumo_ontem_fv": round(consumo_ontem_fv, 3),
+        "consumo_ontem_total": round(consumo_ontem_total, 3),
         "custo_ontem_vazio": round(custo_ontem_vazio, 2),
         "custo_ontem_fv": round(custo_ontem_fv, 2),
         "custo_ontem_total": round(custo_ontem_total, 2),
-        "acumulado_vazio": round(acumulado_vazio, 2),
-        "acumulado_fv": round(acumulado_fv, 2),
-        "acumulado_total": round(acumulado_total, 2),
+        "acumulado_vazio": round(acumulado_vazio, 3),
+        "acumulado_fv": round(acumulado_fv, 3),
+        "acumulado_total": round(acumulado_total, 3),
         "custo_mes_vazio": round(custo_mes_vazio, 2),
         "custo_mes_fv": round(custo_mes_fv, 2),
         "custo_mes_total": round(custo_mes_total, 2),
@@ -229,7 +344,7 @@ def calculate_consumption_costs(rows: list[dict], preco_vazio: float, preco_fv: 
 
 
 def build_message(prices: dict, consumos: dict | None) -> str:
-    hoje_pt = datetime.now(ZoneInfo("Europe/Lisbon")).strftime("%d/%m/%Y")
+    hoje_pt = datetime.now(TZ).strftime("%d/%m/%Y")
 
     parts = [
         f"📅 G9 - {hoje_pt}",
@@ -314,7 +429,7 @@ def send_telegram(message: str) -> None:
 
 
 def main() -> None:
-    now_pt = datetime.now(ZoneInfo("Europe/Lisbon"))
+    now_pt = datetime.now(TZ)
 
     if os.getenv("FORCE_RUN", "").lower() != "1" and now_pt.hour != 8:
         print(f"Skip - não são 08h em Portugal. Hora atual: {now_pt.strftime('%H:%M:%S')}")
@@ -324,13 +439,13 @@ def main() -> None:
     omie_mwh = extract_omie_mwh(html)
     prices = calculate_prices(omie_mwh)
 
-    rows = load_eredes_data()
+    rows = load_eredes_15m_data()
 
     print("=== DEBUG E-REDES ===")
     print("Nº de linhas lidas:", len(rows))
     if rows:
-        print("Primeira data:", rows[0]["date"])
-        print("Última data:", rows[-1]["date"])
+        print("Primeiro datetime:", rows[0]["datetime"])
+        print("Último datetime:", rows[-1]["datetime"])
     print("=== FIM DEBUG E-REDES ===")
 
     consumos = calculate_consumption_costs(rows, prices["PRECO_VAZIO"], prices["PRECO_FV"])
