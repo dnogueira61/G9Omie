@@ -246,7 +246,7 @@ def load_eredes_15m_data() -> list[dict]:
     for idx, row in enumerate(reader, start=1):
         d = parse_date_multi(row.get(col_data, ""))
         h = parse_time_multi(row.get(col_hora, ""))
-        consumo = to_float(row.get(col_consumo, "0"))
+        consumo = to_float(row.get(col_consumo, "0")) * 0.25
         estado = (row.get(col_estado, "") or "").strip() if col_estado else ""
 
         if not d or not h:
