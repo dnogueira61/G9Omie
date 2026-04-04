@@ -1,10 +1,17 @@
 name: G9 diário
 
 on:
-  workflow_dispatch:
   schedule:
-    - cron: '0 8 * * *'
-    - cron: '0 7 * * *'
+    # 07:17 Portugal (inverno/verão)
+    - cron: '17 6 * * *'
+    - cron: '17 7 * * *'
+
+  workflow_dispatch:
+    inputs:
+      force_run:
+        description: 'Forçar execução (1 = sim)'
+        required: false
+        default: '0'
 
 jobs:
   run:
@@ -23,11 +30,19 @@ jobs:
         env:
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+
+          # Tarifário
           PERDAS: ${{ secrets.PERDAS }}
           FADEQ: ${{ secrets.FADEQ }}
           AC: ${{ secrets.AC }}
           GGS: ${{ secrets.GGS }}
           TAR_VAZIO: ${{ secrets.TAR_VAZIO }}
           TAR_FV: ${{ secrets.TAR_FV }}
+
+          # E-REDES
           EREDES_CSV_URL: ${{ secrets.EREDES_CSV_URL }}
+
+          # Force run manual
+          FORCE_RUN: ${{ github.event.inputs.force_run || '0' }}
+
         run: python main.py
