@@ -195,12 +195,13 @@ def load_eredes_15m_data() -> list[dict]:
         print("DEBUG E-REDES: variável EREDES_CSV_URL vazia.")
         return []
 
-    # 🔥 anti-cache
     import time
     url = f"{url}&t={int(time.time())}"
 
     print("DEBUG E-REDES URL:", url[:80])
 
+    csv_text = fetch_text(url)
+    lines = [line.strip("\ufeff") for line in csv_text.splitlines() if line.strip()]
 
     header_index = find_header_index(lines)
     if header_index is None:
