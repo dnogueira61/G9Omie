@@ -190,16 +190,17 @@ def is_vazio(dt_local: datetime) -> bool:
 
 def load_eredes_15m_data() -> list[dict]:
     url = os.getenv("EREDES_CSV_URL")
+
     if not url:
         print("DEBUG E-REDES: variável EREDES_CSV_URL vazia.")
         return []
 
-    csv_text = fetch_text(url)
-    lines = csv_text.splitlines()
+    # 🔥 anti-cache
+    import time
+    url = f"{url}&t={int(time.time())}"
 
-    if not lines:
-        print("DEBUG E-REDES: CSV vazio.")
-        return []
+    print("DEBUG E-REDES URL:", url[:80])
+
 
     header_index = find_header_index(lines)
     if header_index is None:
