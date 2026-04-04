@@ -375,7 +375,9 @@ def calculate_real_consumption_costs(rows: list[dict]) -> dict:
     if not rows:
         return base_empty
 
-    ultima_data = max(r["date"] for r in rows)
+    ultimo_datetime = max(r["datetime"] for r in rows)
+    ultima_data = ultimo_datetime.date()
+    ultima_hora = ultimo_datetime.strftime("%H:%M")
     primeiro_dia_mes = ultima_data.replace(day=1)
     ontem = hoje - timedelta(days=1)
 
@@ -418,24 +420,25 @@ def calculate_real_consumption_costs(rows: list[dict]) -> dict:
     preco_medio_mes = (custo_mes_total / acumulado_total) if acumulado_total > 0 else 0.0
 
     return {
-        "tem_dados_ontem": len(rows_ontem) > 0,
-        "data_ontem": ontem.strftime("%d/%m/%Y"),
-        "ultima_atualizacao": ultima_data.strftime("%d/%m/%Y"),
-        "consumo_ontem_vazio": round(consumo_ontem_vazio, 1),
-        "consumo_ontem_fv": round(consumo_ontem_fv, 1),
-        "consumo_ontem_total": round(consumo_ontem_total, 1),
-        "custo_ontem_vazio": round(custo_ontem_vazio, 2),
-        "custo_ontem_fv": round(custo_ontem_fv, 2),
-        "custo_ontem_total": round(custo_ontem_total, 2),
-        "acumulado_vazio": round(acumulado_vazio, 1),
-        "acumulado_fv": round(acumulado_fv, 1),
-        "acumulado_total": round(acumulado_total, 1),
-        "custo_mes_vazio": round(custo_mes_vazio, 2),
-        "custo_mes_fv": round(custo_mes_fv, 2),
-        "custo_mes_total": round(custo_mes_total, 2),
-        "preco_medio_ontem": round(preco_medio_ontem, 3),
-        "preco_medio_mes": round(preco_medio_mes, 3),
-    }
+    "tem_dados_ontem": len(rows_ontem) > 0,
+    "data_ontem": ontem.strftime("%d/%m/%Y"),
+    "ultima_atualizacao": ultima_data.strftime("%d/%m/%Y"),
+    "ultima_hora": ultima_hora,
+    "consumo_ontem_vazio": round(consumo_ontem_vazio, 1),
+    "consumo_ontem_fv": round(consumo_ontem_fv, 1),
+    "consumo_ontem_total": round(consumo_ontem_total, 1),
+    "custo_ontem_vazio": round(custo_ontem_vazio, 2),
+    "custo_ontem_fv": round(custo_ontem_fv, 2),
+    "custo_ontem_total": round(custo_ontem_total, 2),
+    "acumulado_vazio": round(acumulado_vazio, 1),
+    "acumulado_fv": round(acumulado_fv, 1),
+    "acumulado_total": round(acumulado_total, 1),
+    "custo_mes_vazio": round(custo_mes_vazio, 2),
+    "custo_mes_fv": round(custo_mes_fv, 2),
+    "custo_mes_total": round(custo_mes_total, 2),
+    "preco_medio_ontem": round(preco_medio_ontem, 3),
+    "preco_medio_mes": round(preco_medio_mes, 3),
+}
 
 
 def build_message(prices: dict, consumos: dict | None) -> str:
@@ -467,8 +470,10 @@ def build_message(prices: dict, consumos: dict | None) -> str:
         ])
 
     ultima = "sem dados"
-    if consumos and consumos.get("ultima_atualizacao"):
-        ultima = consumos["ultima_atualizacao"]
+if consumos and consumos.get("ultima_atualizacao"):
+    ultima = consumos["ultima_atualizacao"]
+    if consumos.get("ultima_hora"):
+        ultima = f"{ultima} às {consumos['ultima_hora']}"
 
     parts.extend([
         "",
