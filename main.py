@@ -21,13 +21,13 @@ def getenv_str(name: str, default: str) -> str:
 
 
 def getenv_float(name: str, default: float) -> float:
-    raw = os.getenv(name)
-    if raw is None:
+    value = os.getenv(name)
+    if value is None:
         return default
-    raw = raw.strip()
-    if raw == "":
+    value = value.strip()
+    if value == "":
         return default
-    return float(raw)
+    return float(value)
 
 
 # =========================================================
