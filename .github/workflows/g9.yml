@@ -49,7 +49,7 @@ jobs:
       - name: Generate monthly chart
         env:
           EREDES_CSV_URL: ${{ secrets.EREDES_CSV_URL }}
-        run: python graficos.py
+        run: python grafico_mensal.py
 
       - name: Upload monthly chart artifact
         uses: actions/upload-artifact@v4
