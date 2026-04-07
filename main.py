@@ -2,6 +2,7 @@ import os
 import io
 import csv
 import math
+import re
 from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
 
@@ -210,33 +211,63 @@ def parse_omie_file_for_day(target_day: datetime) -> dict[int, float]:
         )
 
     prices = {}
+    target_date = target_day.date()
 
     for line in text.splitlines():
-        parts = [p.strip() for p in line.split(";")]
-        if len(parts) < 4:
+        line = line.strip()
+        if not line:
             continue
 
-        try:
-            raw_date = parts[0]
-            raw_period = parts[2]
-            raw_price = parts[-1].replace(",", ".")
+        parts = [p.strip() for p in line.split(";") if p.strip()]
+        if not parts:
+            continue
 
-            parsed_date = None
+        parsed_date = None
+        period = None
+        price = None
+
+        # procurar data em qualquer campo
+        for p in parts:
             for fmt in ("%d/%m/%Y", "%Y-%m-%d", "%Y%m%d"):
                 try:
-                    parsed_date = datetime.strptime(raw_date, fmt).date()
+                    parsed_date = datetime.strptime(p, fmt).date()
+                    break
+                except Exception:
+                    pass
+            if parsed_date is not None:
+                break
+
+        if parsed_date != target_date:
+            continue
+
+        # procurar período 1..96 em qualquer campo
+        for p in parts:
+            if re.fullmatch(r"\d{1,3}", p):
+                val = int(p)
+                if 1 <= val <= 96:
+                    period = val
+                    break
+
+        if period is None:
+            continue
+
+        # procurar preço começando do fim da linha
+        for p in reversed(parts):
+            p2 = p.replace(",", ".")
+            if re.fullmatch(r"-?\d+(?:\.\d+)?", p2):
+                try:
+                    price = float(p2)
                     break
                 except Exception:
                     pass
 
-            if parsed_date != target_day.date():
-                continue
-
-            period = int(raw_period)
-            price = float(raw_price)
-            prices[period] = price
-        except Exception:
+        if price is None:
             continue
+
+        prices[period] = price
+
+    # debug útil
+    print(f"OMIE períodos extraídos para {target_day.strftime('%Y-%m-%d')}: {len(prices)}")
 
     if len(prices) == 24:
         expanded = {}
@@ -249,8 +280,11 @@ def parse_omie_file_for_day(target_day: datetime) -> dict[int, float]:
     if len(prices) == 96:
         return prices
 
+    # ajuda a perceber formato real
+    preview = "\n".join(text.splitlines()[:15])
     raise RuntimeError(
-        f"OMIE com número de períodos inesperado em {target_day.date()}: {len(prices)}"
+        f"OMIE com número de períodos inesperado em {target_day.date()}: {len(prices)}\n"
+        f"Primeiras linhas do ficheiro:\n{preview}"
     )
 
 
