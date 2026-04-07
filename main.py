@@ -319,7 +319,10 @@ def load_master_df() -> pd.DataFrame:
     if "timestamp" in raw.columns:
         df = raw.copy()
         df["timestamp"] = pd.to_datetime(df["timestamp"], errors="coerce")
-        df = df.dropna(subset=["timestamp"]).copy()
+df = df.dropna(subset=["timestamp"]).copy()
+
+if getattr(df["timestamp"].dt, "tz", None) is not None:
+    df["timestamp"] = df["timestamp"].dt.tz_localize(None)
     else:
         # ficheiro ainda em formato cru E-REDES
         df = normalize_eredes_dataframe(raw)
@@ -347,13 +350,17 @@ def load_master_df() -> pd.DataFrame:
     ]].copy()
 
 
-def update_master(rows: list[dict]) -> pd.DataFrame:
-    incoming = pd.DataFrame(rows)
-    master = load_master_df()
+combined = combined[[
+    "timestamp", "date", "time", "periodo", "consumo_kwh", "estado",
+    "omie_eur_mwh", "g9_eur_kwh", "custo_eur"
+]].sort_values("timestamp").reset_index(drop=True)
 
-    combined = pd.concat([master, incoming], ignore_index=True)
-    if combined.empty:
-        return combined
+# Excel não aceita datetimes com timezone
+combined["timestamp"] = pd.to_datetime(combined["timestamp"], errors="coerce")
+combined["timestamp"] = combined["timestamp"].dt.tz_localize(None)
+
+combined.to_excel(MASTER_FILE, index=False, engine="openpyxl")
+return combined
 
     combined["timestamp"] = pd.to_datetime(combined["timestamp"], errors="coerce")
     combined = combined.dropna(subset=["timestamp"]).copy()
