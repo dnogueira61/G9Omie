@@ -10,18 +10,39 @@ from datetime import datetime, timedelta, date
 from collections import defaultdict
 
 # =========================================================
+# HELPERS CONFIG
+# =========================================================
+def getenv_str(name: str, default: str) -> str:
+    value = os.getenv(name)
+    if value is None:
+        return default
+    value = value.strip()
+    return value if value != "" else default
+
+
+def getenv_float(name: str, default: float) -> float:
+    raw = os.getenv(name)
+    if raw is None:
+        return default
+    raw = raw.strip()
+    if raw == "":
+        return default
+    return float(raw)
+
+
+# =========================================================
 # CONFIG
 # =========================================================
-TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "").strip()
-TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID", "").strip()
-EREDES_CSV_URL = os.getenv("EREDES_CSV_URL", "").strip()
+TELEGRAM_BOT_TOKEN = getenv_str("TELEGRAM_BOT_TOKEN", "")
+TELEGRAM_CHAT_ID = getenv_str("TELEGRAM_CHAT_ID", "")
+EREDES_CSV_URL = getenv_str("EREDES_CSV_URL", "")
 
-PERDAS = float(os.getenv("PERDAS", "0.15"))
-FADEQ = float(os.getenv("FADEQ", "1.02"))
-AC = float(os.getenv("AC", "0.0055"))
-GGS = float(os.getenv("GGS", "0.0100"))
-TAR_VAZIO = float(os.getenv("TAR_VAZIO", "0.0158"))
-TAR_FV = float(os.getenv("TAR_FV", "0.0835"))
+PERDAS = getenv_float("PERDAS", 0.15)
+FADEQ = getenv_float("FADEQ", 1.02)
+AC = getenv_float("AC", 0.0055)
+GGS = getenv_float("GGS", 0.0100)
+TAR_VAZIO = getenv_float("TAR_VAZIO", 0.0158)
+TAR_FV = getenv_float("TAR_FV", 0.0835)
 
 EXPECTED_INTERVALS_PER_DAY = 96
 MIN_PREVIOUS_DAY_RATIO = 0.80
@@ -147,13 +168,6 @@ def looks_like_html(text: str) -> bool:
 
 
 def parse_omie_prices(text: str) -> dict[int, float]:
-    """
-    Suporta:
-    - formato antigo: 24 linhas (1..24)
-    - formato novo: 96 períodos de 15 min (1..96)
-
-    Devolve sempre dict {0..23: preço médio por hora}
-    """
     hour_buckets = defaultdict(list)
 
     for raw_line in text.splitlines():
@@ -417,10 +431,6 @@ def count_intervals_by_day(rows: list[dict]) -> dict[date, int]:
 
 
 def choose_consumption_day(rows: list[dict], today_ref: date) -> tuple[date | None, int, str | None]:
-    """
-    1) Usa o dia anterior se tiver >= 80%
-    2) Senão usa o último dia com > 70%
-    """
     if not rows:
         return None, 0, None
 
@@ -665,7 +675,6 @@ def build_message(
 def main():
     today_ref = datetime.now().date()
 
-    # OMIE de ontem -> reflete-se no dia da mensagem
     omie_reference_day_requested = today_ref - timedelta(days=1)
     omie_prices, omie_reference_day_used = load_omie_day_with_fallback(
         omie_reference_day_requested,
@@ -673,11 +682,8 @@ def main():
     )
     omie_avg, g9_vazio, g9_fv = calc_g9_prices_from_omie(omie_prices)
 
-    # Leituras E-REDES
     rows = load_eredes_15m_data()
 
-    # 1) dia anterior se >=80%
-    # 2) senão último dia com >70%
     chosen_day, chosen_count, chosen_mode = choose_consumption_day(rows, today_ref)
 
     if chosen_day:
