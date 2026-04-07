@@ -6,6 +6,7 @@ import time
 import math
 import urllib.request
 import urllib.parse
+import urllib.error
 from datetime import datetime, timedelta, date
 from collections import defaultdict
 
@@ -30,8 +31,16 @@ MIN_FALLBACK_DAY_RATIO = 0.70
 MIN_PREVIOUS_DAY_INTERVALS = math.ceil(EXPECTED_INTERVALS_PER_DAY * MIN_PREVIOUS_DAY_RATIO)  # 77
 MIN_FALLBACK_DAY_INTERVALS = math.floor(EXPECTED_INTERVALS_PER_DAY * MIN_FALLBACK_DAY_RATIO) + 1  # >70% => 68
 
-OMIE_URL_TEMPLATE = "https://www.omie.es/sites/default/files/dados/AGNO_{year}/MES_{month}/TXT/marginalpdbcpt_{yyyymmdd}.1"
-
+# Endpoint atual/robusto da OMIE
+OMIE_DOWNLOAD_URL = "https://www.omie.es/en/file-download?filename={filename}&parents=marginalpdbcpt"
+OMIE_LISTING_URL = (
+    "https://www.omie.es/en/file-access-list"
+    "?dir=+Pre%C3%A7os+por+hora+do+mercado+di%C3%A1rio+em+Portugal"
+    "&parents%5B0%5D=%2F"
+    "&parents%5B1%5D=+Mercado+Di%C3%A1rio"
+    "&parents%5B2%5D=1.+Pre%C3%A7os"
+    "&realdir=marginalpdbcpt"
+)
 
 # =========================================================
 # HELPERS
@@ -55,6 +64,19 @@ def fetch_text(url: str) -> str:
             continue
 
     return raw.decode("utf-8", errors="replace")
+
+
+def fetch_bytes(url: str) -> bytes:
+    req = urllib.request.Request(
+        url,
+        headers={
+            "User-Agent": "Mozilla/5.0",
+            "Cache-Control": "no-cache",
+            "Pragma": "no-cache",
+        },
+    )
+    with urllib.request.urlopen(req, timeout=30) as resp:
+        return resp.read()
 
 
 def normalize_google_sheets_csv_url(url: str) -> str:
@@ -87,13 +109,8 @@ def parse_float_pt(value) -> float:
     if not s:
         return 0.0
 
-    # Se tiver vírgula decimal, remove pontos de milhar
     if "," in s:
         s = s.replace(".", "").replace(",", ".")
-    else:
-        # Se não tiver vírgula, assume ponto decimal normal
-        s = s
-
     try:
         return float(s)
     except Exception:
@@ -119,12 +136,8 @@ def is_vazio(dt: datetime) -> bool:
 # =========================================================
 # OMIE
 # =========================================================
-def build_omie_url(target_date: date) -> str:
-    return OMIE_URL_TEMPLATE.format(
-        year=target_date.strftime("%Y"),
-        month=target_date.strftime("%m"),
-        yyyymmdd=target_date.strftime("%Y%m%d"),
-    )
+def omie_filename(target_date: date) -> str:
+    return f"marginalpdbcpt_{target_date.strftime('%Y%m%d')}.1"
 
 
 def parse_omie_prices(text: str) -> dict[int, float]:
@@ -143,7 +156,7 @@ def parse_omie_prices(text: str) -> dict[int, float]:
             hour = int(parts[2])
             price = float(parts[5].replace(",", "."))
             if 1 <= hour <= 24:
-                prices[hour - 1] = price  # 0..23
+                prices[hour - 1] = price
         except Exception:
             continue
 
@@ -154,9 +167,44 @@ def parse_omie_prices(text: str) -> dict[int, float]:
 
 
 def load_omie_day(target_date: date) -> dict[int, float]:
-    url = build_omie_url(target_date)
-    txt = fetch_text(url)
-    return parse_omie_prices(txt)
+    filename = omie_filename(target_date)
+
+    # 1) Tenta endpoint de download direto
+    url = OMIE_DOWNLOAD_URL.format(filename=urllib.parse.quote(filename))
+    try:
+        raw = fetch_bytes(url)
+        text = None
+        for enc in ("utf-8-sig", "utf-8", "cp1252", "latin-1"):
+            try:
+                text = raw.decode(enc)
+                break
+            except UnicodeDecodeError:
+                continue
+        if text is None:
+            text = raw.decode("utf-8", errors="replace")
+        return parse_omie_prices(text)
+    except Exception as e:
+        print(f"AVISO: download direto OMIE falhou para {filename}: {e}")
+
+    # 2) Fallback: verifica se o ficheiro existe na listagem pública
+    listing_html = fetch_text(OMIE_LISTING_URL)
+    if filename not in listing_html:
+        raise FileNotFoundError(f"OMIE não lista o ficheiro {filename}")
+
+    # 3) Tenta novamente sem quote extra, por compatibilidade
+    url = f"https://www.omie.es/en/file-download?filename={filename}&parents=marginalpdbcpt"
+    raw = fetch_bytes(url)
+    text = None
+    for enc in ("utf-8-sig", "utf-8", "cp1252", "latin-1"):
+        try:
+            text = raw.decode(enc)
+            break
+        except UnicodeDecodeError:
+            continue
+    if text is None:
+        text = raw.decode("utf-8", errors="replace")
+
+    return parse_omie_prices(text)
 
 
 def omie_mwh_to_g9_kwh(omie_eur_mwh: float, vazio: bool) -> float:
@@ -276,7 +324,6 @@ def load_eredes_15m_data() -> list[dict]:
 
     rows.sort(key=lambda x: x["datetime"])
 
-    # remove duplicados por datetime, ficando a última ocorrência
     dedup = {}
     for row in rows:
         dedup[row["datetime"]] = row
@@ -293,9 +340,8 @@ def count_intervals_by_day(rows: list[dict]) -> dict[date, int]:
 
 def choose_consumption_day(rows: list[dict], today_ref: date) -> tuple[date | None, int, str | None]:
     """
-    Regra:
-    1) Tenta usar o dia anterior, mas só se tiver >= 80%
-    2) Se não tiver, procura o último dia com > 70%
+    1) Usa o dia anterior se tiver >= 80%
+    2) Senão usa o último dia com > 70%
     """
     if not rows:
         return None, 0, None
@@ -527,7 +573,7 @@ def build_message(
 def main():
     today_ref = datetime.now().date()
 
-    # OMIE de ontem -> é o que se aplica ao dia da mensagem
+    # OMIE de ontem -> reflete-se no dia da mensagem
     omie_reference_day = today_ref - timedelta(days=1)
     omie_prices = load_omie_day(omie_reference_day)
     omie_avg, g9_vazio, g9_fv = calc_g9_prices_from_omie(omie_prices)
@@ -535,7 +581,6 @@ def main():
     # Leituras E-REDES
     rows = load_eredes_15m_data()
 
-    # Escolha do dia de consumos:
     # 1) dia anterior se >=80%
     # 2) senão último dia com >70%
     chosen_day, chosen_count, chosen_mode = choose_consumption_day(rows, today_ref)
