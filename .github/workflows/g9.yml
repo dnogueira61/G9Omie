@@ -1,43 +1,34 @@
-name: G9 OMIE Daily
+name: G9 OMIE
 
 on:
   schedule:
-    - cron: "0 7 * * *"
+    - cron: '0 7 * * *'
   workflow_dispatch:
 
 jobs:
-  run-g9:
+  run:
     runs-on: ubuntu-latest
 
     steps:
-      - name: Checkout
+      - name: Checkout repo
         uses: actions/checkout@v4
 
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
-          python-version: "3.12"
+          python-version: '3.12'
 
-    - name: Install dependencies
-  run: |
-    python -m pip install --upgrade pip
-    pip install pandas requests openpyxl matplotlib
-
-      - name: Debug env presence
+      - name: Install dependencies
         run: |
-          echo "TELEGRAM_BOT_TOKEN set: $([[ -n '${{ secrets.TELEGRAM_BOT_TOKEN }}' ]] && echo yes || echo no)"
-          echo "TELEGRAM_CHAT_ID set: $([[ -n '${{ secrets.TELEGRAM_CHAT_ID }}' ]] && echo yes || echo no)"
-          echo "EREDES_CSV_URL set: $([[ -n '${{ secrets.EREDES_CSV_URL }}' ]] && echo yes || echo no)"
-          echo "PERDAS set: $([[ -n '${{ vars.PERDAS }}' ]] && echo yes || echo no)"
-          echo "FADEQ set: $([[ -n '${{ vars.FADEQ }}' ]] && echo yes || echo no)"
-          echo "AC set: $([[ -n '${{ vars.AC }}' ]] && echo yes || echo no)"
-          echo "GGS set: $([[ -n '${{ vars.GGS }}' ]] && echo yes || echo no)"
-          echo "TAR_VAZIO set: $([[ -n '${{ vars.TAR_VAZIO }}' ]] && echo yes || echo no)"
-          echo "TAR_FV set: $([[ -n '${{ vars.TAR_FV }}' ]] && echo yes || echo no)"
+          python -m pip install --upgrade pip
+          pip install pandas requests openpyxl matplotlib
+
+      - name: List files
+        run: ls -R
 
       - name: Run main script
         env:
-          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
           EREDES_CSV_URL: ${{ secrets.EREDES_CSV_URL }}
           PERDAS: ${{ vars.PERDAS }}
@@ -46,14 +37,13 @@ jobs:
           GGS: ${{ vars.GGS }}
           TAR_VAZIO: ${{ vars.TAR_VAZIO }}
           TAR_FV: ${{ vars.TAR_FV }}
+          FORCE_RUN: "0"
         run: python main.py
 
-      - name: Generate monthly chart
-        env:
-          EREDES_CSV_URL: ${{ secrets.EREDES_CSV_URL }}
+      - name: Run monthly dashboard
         run: python grafico_mensal.py
 
-      - name: Upload monthly chart artifact
+      - name: Upload graph artifact
         uses: actions/upload-artifact@v4
         with:
           name: grafico-mensal
