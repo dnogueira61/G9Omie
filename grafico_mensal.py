@@ -10,7 +10,6 @@ from collections import defaultdict
 
 import matplotlib.pyplot as plt
 
-
 # =========================================================
 # CONFIG HELPERS
 # =========================================================
@@ -18,13 +17,11 @@ def getenv_str(name: str, default: str) -> str:
     value = os.getenv(name)
     if value is None:
         return default
-
     value = value.strip()
     return value if value != "" else default
 
 
 EREDES_CSV_URL = getenv_str("EREDES_CSV_URL", "")
-
 
 # =========================================================
 # GENERIC HELPERS
@@ -87,7 +84,6 @@ def parse_float_pt(value) -> float:
 
     if "," in s:
         s = s.replace(".", "").replace(",", ".")
-
     try:
         return float(s)
     except Exception:
