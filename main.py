@@ -310,20 +310,41 @@ def load_eredes_15m_data() -> list[dict]:
         print("DEBUG E-REDES: variável EREDES_CSV_URL vazia.")
         return []
 
+    print(f"DEBUG E-REDES: URL presente? {'sim' if bool(url) else 'não'}")
     url = add_cache_buster(url)
-    csv_text = fetch_text(url)
 
-    lines = csv_text.splitlines()
-    if not lines:
+    try:
+        csv_text = fetch_text(url)
+    except Exception as e:
+        print(f"DEBUG E-REDES: erro ao descarregar CSV: {e}")
         return []
 
+    print(f"DEBUG E-REDES: tamanho do CSV descarregado = {len(csv_text)} caracteres")
+
+    lines = csv_text.splitlines()
+    print(f"DEBUG E-REDES: número de linhas brutas = {len(lines)}")
+
+    if not lines:
+        print("DEBUG E-REDES: CSV sem linhas.")
+        return []
+
+    print("DEBUG E-REDES: primeiras 5 linhas do ficheiro:")
+    for i, line in enumerate(lines[:5], start=1):
+        print(f"  [{i}] {line}")
+
     header_idx = find_header_row(lines)
+    print(f"DEBUG E-REDES: header_idx = {header_idx}")
+
     content = "\n".join(lines[header_idx:])
     delimiter = detect_csv_delimiter(content[:2000])
+    print(f"DEBUG E-REDES: delimitador detetado = '{delimiter}'")
 
     reader = csv.DictReader(io.StringIO(content), delimiter=delimiter)
 
     rows = []
+    skipped_no_datetime = 0
+    skipped_bad_datetime = 0
+
     for r in reader:
         norm = {str(k).strip().lower(): (v.strip() if isinstance(v, str) else v) for k, v in r.items() if k}
 
@@ -348,11 +369,13 @@ def load_eredes_15m_data() -> list[dict]:
         estado = norm.get("estado", "")
 
         if not data_str or not hora_str:
+            skipped_no_datetime += 1
             continue
 
         try:
             dt = parse_eredes_datetime(data_str, hora_str)
         except Exception:
+            skipped_bad_datetime += 1
             continue
 
         consumo = parse_float_pt(consumo_str)
@@ -363,13 +386,26 @@ def load_eredes_15m_data() -> list[dict]:
             "estado": estado,
         })
 
+    print(f"DEBUG E-REDES: linhas válidas antes de dedup = {len(rows)}")
+    print(f"DEBUG E-REDES: ignoradas sem data/hora = {skipped_no_datetime}")
+    print(f"DEBUG E-REDES: ignoradas por data/hora inválida = {skipped_bad_datetime}")
+
     rows.sort(key=lambda x: x["datetime"])
 
     dedup = {}
     for row in rows:
         dedup[row["datetime"]] = row
 
-    return list(sorted(dedup.values(), key=lambda x: x["datetime"]))
+    final_rows = list(sorted(dedup.values(), key=lambda x: x["datetime"]))
+    print(f"DEBUG E-REDES: linhas válidas finais = {len(final_rows)}")
+
+    if final_rows:
+        print(f"DEBUG E-REDES: primeira leitura = {final_rows[0]['datetime']} | {final_rows[0]['consumo_kwh']}")
+        print(f"DEBUG E-REDES: última leitura = {final_rows[-1]['datetime']} | {final_rows[-1]['consumo_kwh']}")
+    else:
+        print("DEBUG E-REDES: nenhuma leitura válida encontrada.")
+
+    return final_rows
 
 
 def count_intervals_by_day(rows: list[dict]) -> dict[date, int]:
