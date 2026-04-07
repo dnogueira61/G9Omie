@@ -179,20 +179,41 @@ def load_eredes_15m_data() -> list[dict]:
     return rows
 
 
-def omie_url_for_date(d: datetime) -> str:
+def omie_candidate_urls_for_date(d: datetime) -> list[str]:
     ymd = d.strftime("%Y%m%d")
-    return f"https://www.omie.es/sites/default/files/dados/AGNO_{d:%Y}/MES_{d:%m}/TXT/marginalpdbcpt_{ymd}.1"
+    filename = f"marginalpdbcpt_{ymd}.1"
+
+    return [
+        f"https://www.omie.es/pt/file-download?filename={filename}&parents=marginalpdbcpt",
+        f"https://www.omie.es/en/file-download?filename={filename}&parents=marginalpdbcpt",
+        f"https://www.omie.es/sites/default/files/dados/AGNO_{d:%Y}/MES_{d:%m}/TXT/{filename}",
+    ]
 
 
 def parse_omie_file_for_day(target_day: datetime) -> dict[int, float]:
-    url = omie_url_for_date(target_day)
-    text = fetch_text(url)
+    last_error = None
+    text = None
+
+    for url in omie_candidate_urls_for_date(target_day):
+        try:
+            text = fetch_text(url)
+            if text and len(text.strip()) > 20:
+                print(f"OMIE OK: {url}")
+                break
+        except Exception as e:
+            last_error = e
+            print(f"OMIE falhou: {url} -> {e}")
+
+    if not text:
+        raise RuntimeError(
+            f"Não foi possível obter OMIE para {target_day.strftime('%Y-%m-%d')}. Último erro: {last_error}"
+        )
 
     prices = {}
 
     for line in text.splitlines():
         parts = [p.strip() for p in line.split(";")]
-        if len(parts) < 6:
+        if len(parts) < 4:
             continue
 
         try:
@@ -228,7 +249,9 @@ def parse_omie_file_for_day(target_day: datetime) -> dict[int, float]:
     if len(prices) == 96:
         return prices
 
-    raise RuntimeError(f"OMIE com número de períodos inesperado em {target_day.date()}: {len(prices)}")
+    raise RuntimeError(
+        f"OMIE com número de períodos inesperado em {target_day.date()}: {len(prices)}"
+    )
 
 
 def g9_price_from_omie_eur_mwh(omie_eur_mwh: float, vazio: bool) -> float:
