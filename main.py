@@ -1,289 +1,96 @@
 import os
-import csv
 import io
-import re
-import time
+import csv
 import math
-import urllib.request
-import urllib.parse
-from datetime import datetime, timedelta, date
-from collections import defaultdict
+import requests
+import pandas as pd
+from datetime import datetime, timedelta
+from zoneinfo import ZoneInfo
 
-# =========================================================
-# HELPERS CONFIG
-# =========================================================
-def getenv_str(name: str, default: str) -> str:
-    value = os.getenv(name)
-    if value is None:
-        return default
-    value = value.strip()
-    return value if value != "" else default
+TZ = ZoneInfo("Europe/Lisbon")
 
+MASTER_FILE = "master.csv"
 
-def getenv_float(name: str, default: float) -> float:
-    value = os.getenv(name)
-    if value is None:
-        return default
-    value = value.strip()
-    if value == "":
-        return default
-    return float(value)
+TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN", "").strip()
+TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID", "").strip()
+EREDES_CSV_URL = os.getenv("EREDES_CSV_URL", "").strip()
+FORCE_RUN = os.getenv("FORCE_RUN", "0").strip() == "1"
+
+PERDAS = float(os.getenv("PERDAS", "0.15") or "0.15")
+FADEQ = float(os.getenv("FADEQ", "1.02") or "1.02")
+AC = float(os.getenv("AC", "0.0055") or "0.0055")
+GGS = float(os.getenv("GGS", "0.0100") or "0.0100")
+TAR_VAZIO = float(os.getenv("TAR_VAZIO", "0.0158") or "0.0158")
+TAR_FV = float(os.getenv("TAR_FV", "0.0835") or "0.0835")
 
 
-# =========================================================
-# CONFIG
-# =========================================================
-TELEGRAM_BOT_TOKEN = getenv_str("TELEGRAM_BOT_TOKEN", "")
-TELEGRAM_CHAT_ID = getenv_str("TELEGRAM_CHAT_ID", "")
-EREDES_CSV_URL = getenv_str("EREDES_CSV_URL", "")
-
-PERDAS = getenv_float("PERDAS", 0.15)
-FADEQ = getenv_float("FADEQ", 1.02)
-AC = getenv_float("AC", 0.0055)
-GGS = getenv_float("GGS", 0.0100)
-TAR_VAZIO = getenv_float("TAR_VAZIO", 0.0158)
-TAR_FV = getenv_float("TAR_FV", 0.0835)
-
-EXPECTED_INTERVALS_PER_DAY = 96
-MIN_PREVIOUS_DAY_RATIO = 0.80
-MIN_FALLBACK_DAY_RATIO = 0.70
-
-MIN_PREVIOUS_DAY_INTERVALS = math.ceil(EXPECTED_INTERVALS_PER_DAY * MIN_PREVIOUS_DAY_RATIO)   # 77
-MIN_FALLBACK_DAY_INTERVALS = math.floor(EXPECTED_INTERVALS_PER_DAY * MIN_FALLBACK_DAY_RATIO) + 1  # 68
-
-OMIE_DIRECT_URL_TEMPLATE = "https://www.omie.es/sites/default/files/dados/AGNO_{year}/MES_{month}/TXT/{filename}"
-OMIE_DOWNLOAD_URL_TEMPLATE_PT = "https://www.omie.es/pt/file-download?parents=marginalpdbcpt&filename={filename}"
-OMIE_DOWNLOAD_URL_TEMPLATE_EN = "https://www.omie.es/en/file-download?parents=marginalpdbcpt&filename={filename}"
+def now_local() -> datetime:
+    return datetime.now(TZ)
 
 
-# =========================================================
-# HELPERS
-# =========================================================
-def fetch_bytes(url: str) -> bytes:
-    req = urllib.request.Request(
-        url,
-        headers={
-            "User-Agent": "Mozilla/5.0",
-            "Cache-Control": "no-cache",
-            "Pragma": "no-cache",
-        },
-    )
-    with urllib.request.urlopen(req, timeout=30) as resp:
-        return resp.read()
+def fmt_date(d: datetime) -> str:
+    return d.strftime("%d/%m/%Y")
 
 
-def decode_bytes(raw: bytes) -> str:
-    for enc in ("utf-8-sig", "utf-8", "cp1252", "latin-1"):
-        try:
-            return raw.decode(enc)
-        except UnicodeDecodeError:
-            continue
-    return raw.decode("utf-8", errors="replace")
+def fmt_dt(d: datetime) -> str:
+    return d.strftime("%d/%m/%Y às %H:%M")
+
+
+def is_vazio(dt: datetime) -> bool:
+    h = dt.hour
+    return h >= 22 or h < 8
+
+
+def periodo_label(dt: datetime) -> str:
+    return "Vazio" if is_vazio(dt) else "Fora vazio"
 
 
 def fetch_text(url: str) -> str:
-    return decode_bytes(fetch_bytes(url))
+    headers = {
+        "User-Agent": "Mozilla/5.0",
+        "Accept": "*/*",
+    }
+    r = requests.get(url, headers=headers, timeout=60)
+    r.raise_for_status()
+    return r.text
 
 
-def normalize_google_sheets_csv_url(url: str) -> str:
-    if not url:
-        return url
+def fetch_bytes(url: str) -> bytes:
+    headers = {
+        "User-Agent": "Mozilla/5.0",
+        "Accept": "*/*",
+    }
+    r = requests.get(url, headers=headers, timeout=60)
+    r.raise_for_status()
+    return r.content
 
+
+def normalize_google_sheets_url(url: str) -> str:
     if "docs.google.com/spreadsheets" in url and "/export?" not in url:
-        m = re.search(r"/d/([a-zA-Z0-9-_]+)", url)
-        if m:
-            sheet_id = m.group(1)
-            gid_match = re.search(r"[#&?]gid=([0-9]+)", url)
-            gid = gid_match.group(1) if gid_match else "0"
-            return f"https://docs.google.com/spreadsheets/d/{sheet_id}/export?format=csv&gid={gid}"
-
+        if "/edit" in url:
+            url = url.split("/edit")[0]
+        if "gid=" not in url:
+            return f"{url}/export?format=csv"
+        gid = url.split("gid=")[-1].split("&")[0]
+        return f"{url}/export?format=csv&gid={gid}"
     return url
 
 
-def add_cache_buster(url: str) -> str:
-    if not url:
-        return url
-    sep = "&" if "?" in url else "?"
-    return f"{url}{sep}t={int(time.time())}"
-
-
 def parse_float_pt(value) -> float:
-    if value is None:
+    if pd.isna(value):
         return 0.0
-
-    s = str(value).strip().replace("\xa0", "").replace(" ", "")
+    s = str(value).strip()
     if not s:
         return 0.0
-
-    if "," in s:
-        s = s.replace(".", "").replace(",", ".")
+    s = s.replace(".", "").replace(",", ".")
     try:
         return float(s)
     except Exception:
         return 0.0
 
 
-def format_num(value: float, digits: int) -> str:
-    return f"{value:.{digits}f}"
-
-
-def format_kwh(value: float) -> str:
-    return f"{value:.1f}"
-
-
-def format_eur(value: float, digits: int = 2) -> str:
-    return f"{value:.{digits}f}"
-
-
-def is_vazio(dt: datetime) -> bool:
-    return dt.hour >= 22 or dt.hour < 8
-
-
-def safe_max_dt(rows: list[dict]):
-    return max((r["datetime"] for r in rows), default=None)
-
-
-# =========================================================
-# OMIE
-# =========================================================
-def omie_filename(target_date: date) -> str:
-    return f"marginalpdbcpt_{target_date.strftime('%Y%m%d')}.1"
-
-
-def build_omie_candidate_urls(target_date: date) -> list[str]:
-    filename = omie_filename(target_date)
-    year = target_date.strftime("%Y")
-    month = target_date.strftime("%m")
-
-    return [
-        OMIE_DIRECT_URL_TEMPLATE.format(year=year, month=month, filename=filename),
-        OMIE_DOWNLOAD_URL_TEMPLATE_PT.format(filename=urllib.parse.quote(filename)),
-        OMIE_DOWNLOAD_URL_TEMPLATE_EN.format(filename=urllib.parse.quote(filename)),
-    ]
-
-
-def looks_like_html(text: str) -> bool:
-    head = text[:500].lower()
-    return ("<html" in head) or ("<!doctype html" in head) or ("<body" in head)
-
-
-def parse_omie_prices(text: str) -> dict[int, float]:
-    hour_buckets = defaultdict(list)
-
-    for raw_line in text.splitlines():
-        line = raw_line.strip()
-        if not line:
-            continue
-        if line.upper().startswith("MARGINALPDBCPT"):
-            continue
-        if line.startswith("*"):
-            continue
-
-        parts = [p.strip() for p in line.split(";")]
-        if len(parts) < 5:
-            continue
-
-        period_raw = parts[3]
-        price_raw = parts[4].replace(",", ".")
-
-        if not re.fullmatch(r"\d{1,3}", period_raw):
-            continue
-        if not re.fullmatch(r"-?\d+(?:\.\d+)?", price_raw):
-            continue
-
-        period = int(period_raw)
-        price = float(price_raw)
-
-        if 1 <= period <= 96:
-            hour = (period - 1) // 4
-            hour_buckets[hour].append(price)
-        elif 1 <= period <= 24:
-            hour = period - 1
-            hour_buckets[hour].append(price)
-
-    prices = {}
-    for hour in range(24):
-        vals = hour_buckets.get(hour, [])
-        if not vals:
-            continue
-        prices[hour] = sum(vals) / len(vals)
-
-    if len(prices) != 24:
-        snippet = text[:1500].replace("\n", "\\n")
-        raise ValueError(
-            f"Não foi possível construir as 24 horas OMIE. "
-            f"Horas construídas: {len(prices)}. Início do conteúdo: {snippet}"
-        )
-
-    return prices
-
-
-def load_omie_day(target_date: date) -> dict[int, float]:
-    urls = build_omie_candidate_urls(target_date)
-    last_error = None
-
-    for url in urls:
-        try:
-            print(f"OMIE: a tentar {url}")
-            raw = fetch_bytes(url)
-            text = decode_bytes(raw)
-
-            if looks_like_html(text):
-                raise ValueError("Resposta OMIE parece HTML em vez de TXT.")
-
-            return parse_omie_prices(text)
-
-        except Exception as e:
-            last_error = e
-            print(f"AVISO: tentativa OMIE falhou para {target_date} | url={url} | erro={e}")
-
-    raise RuntimeError(f"Falha ao carregar OMIE de {target_date}: {last_error}")
-
-
-def load_omie_day_with_fallback(reference_day: date, max_back_days: int = 5) -> tuple[dict[int, float], date]:
-    errors = []
-
-    for back in range(0, max_back_days + 1):
-        d = reference_day - timedelta(days=back)
-        try:
-            prices = load_omie_day(d)
-            if back > 0:
-                print(f"OMIE fallback usado: {d} (em vez de {reference_day})")
-            return prices, d
-        except Exception as e:
-            errors.append(f"{d}: {e}")
-
-    raise RuntimeError("Falha total OMIE. Tentativas: " + " | ".join(errors))
-
-
-def omie_mwh_to_g9_kwh(omie_eur_mwh: float, vazio: bool) -> float:
-    base_kwh = omie_eur_mwh / 1000.0
-    tar = TAR_VAZIO if vazio else TAR_FV
-    return (base_kwh * FADEQ * (1 + PERDAS)) + AC + GGS + tar
-
-
-def calc_g9_prices_from_omie(omie_prices: dict[int, float]) -> tuple[float, float, float]:
-    vazio_vals = []
-    fv_vals = []
-
-    for hour, omie_price in omie_prices.items():
-        price_kwh = omie_mwh_to_g9_kwh(omie_price, vazio=(hour >= 22 or hour < 8))
-        if hour >= 22 or hour < 8:
-            vazio_vals.append(price_kwh)
-        else:
-            fv_vals.append(price_kwh)
-
-    omie_avg = sum(omie_prices.values()) / len(omie_prices) if omie_prices else 0.0
-    avg_vazio = sum(vazio_vals) / len(vazio_vals) if vazio_vals else 0.0
-    avg_fv = sum(fv_vals) / len(fv_vals) if fv_vals else 0.0
-
-    return omie_avg, avg_vazio, avg_fv
-
-
-# =========================================================
-# E-REDES
-# =========================================================
-def detect_csv_delimiter(sample: str) -> str:
+def detect_csv_delimiter(text: str) -> str:
+    sample = "\n".join(text.splitlines()[:10])
     try:
         dialect = csv.Sniffer().sniff(sample, delimiters=";,")
         return dialect.delimiter
@@ -292,425 +99,474 @@ def detect_csv_delimiter(sample: str) -> str:
 
 
 def find_header_row(lines: list[str]) -> int:
-    for i, line in enumerate(lines[:20]):
+    for i, line in enumerate(lines[:30]):
         low = line.lower()
         if "data" in low and "hora" in low:
             return i
     return 0
 
 
-def parse_eredes_datetime(data_str: str, hora_str: str) -> datetime:
-    data_str = data_str.strip()
-    hora_str = hora_str.strip()
-
-    formats = (
-        "%d/%m/%Y %H:%M",
-        "%Y-%m-%d %H:%M",
-        "%Y/%m/%d %H:%M",
-        "%d-%m-%Y %H:%M",
-    )
-
-    for fmt in formats:
-        try:
-            return datetime.strptime(f"{data_str} {hora_str}", fmt)
-        except Exception:
-            pass
-
-    raise ValueError(f"Data/hora inválida: {data_str} {hora_str}")
-
-
 def load_eredes_15m_data() -> list[dict]:
-    url = normalize_google_sheets_csv_url(EREDES_CSV_URL)
+    url = normalize_google_sheets_url(EREDES_CSV_URL)
     if not url:
-        print("DEBUG E-REDES: variável EREDES_CSV_URL vazia.")
+        print("EREDES_CSV_URL vazio.")
         return []
 
-    print(f"DEBUG E-REDES: URL presente? {'sim' if bool(url) else 'não'}")
-    url = add_cache_buster(url)
+    if "docs.google.com" in url:
+        sep = "&" if "?" in url else "?"
+        url = f"{url}{sep}t={int(now_local().timestamp())}"
 
-    try:
-        csv_text = fetch_text(url)
-    except Exception as e:
-        print(f"DEBUG E-REDES: erro ao descarregar CSV: {e}")
-        return []
-
-    print(f"DEBUG E-REDES: tamanho do CSV descarregado = {len(csv_text)} caracteres")
-
-    lines = csv_text.splitlines()
-    print(f"DEBUG E-REDES: número de linhas brutas = {len(lines)}")
-
+    text = fetch_text(url)
+    lines = text.splitlines()
     if not lines:
-        print("DEBUG E-REDES: CSV sem linhas.")
         return []
 
-    print("DEBUG E-REDES: primeiras 5 linhas do ficheiro:")
-    for i, line in enumerate(lines[:5], start=1):
-        print(f"  [{i}] {line}")
+    delimiter = detect_csv_delimiter(text)
+    header_row = find_header_row(lines)
+    cleaned = "\n".join(lines[header_row:])
 
-    header_idx = find_header_row(lines)
-    print(f"DEBUG E-REDES: header_idx = {header_idx}")
+    df = pd.read_csv(io.StringIO(cleaned), sep=delimiter, dtype=str)
+    df.columns = [str(c).strip() for c in df.columns]
 
-    content = "\n".join(lines[header_idx:])
-    delimiter = detect_csv_delimiter(content[:2000])
-    print(f"DEBUG E-REDES: delimitador detetado = '{delimiter}'")
+    col_data = next((c for c in df.columns if c.lower() == "data"), None)
+    col_hora = next((c for c in df.columns if c.lower() == "hora"), None)
+    col_consumo = next(
+        (
+            c
+            for c in df.columns
+            if "consumo registado" in c.lower()
+            or c.lower() == "consumo"
+            or "consumo medido" in c.lower()
+        ),
+        None,
+    )
+    col_estado = next((c for c in df.columns if c.lower() == "estado"), None)
 
-    reader = csv.DictReader(io.StringIO(content), delimiter=delimiter)
+    if not col_data or not col_hora or not col_consumo:
+        raise RuntimeError(f"Não encontrei colunas esperadas no CSV E-REDES. Colunas: {list(df.columns)}")
 
     rows = []
-    skipped_no_datetime = 0
-    skipped_bad_datetime = 0
+    for _, r in df.iterrows():
+        data_raw = str(r.get(col_data, "")).strip()
+        hora_raw = str(r.get(col_hora, "")).strip()
+        consumo_raw = r.get(col_consumo, "")
+        estado_raw = str(r.get(col_estado, "")).strip() if col_estado else ""
 
-    for r in reader:
-        norm = {str(k).strip().lower(): (v.strip() if isinstance(v, str) else v) for k, v in r.items() if k}
+        if not data_raw or not hora_raw:
+            continue
 
-        data_str = (
-            norm.get("data")
-            or norm.get("date")
-            or norm.get("dia")
-            or ""
-        )
-        hora_str = (
-            norm.get("hora")
-            or norm.get("hour")
-            or ""
-        )
-        consumo_str = (
-            norm.get("consumo registado (kw)")
-            or norm.get("consumo registado (kwh)")
-            or norm.get("consumo")
-            or norm.get("energia")
-            or ""
-        )
-        estado = norm.get("estado", "")
+        dt = None
+        for fmt in ("%d/%m/%Y %H:%M", "%Y/%m/%d %H:%M", "%Y-%m-%d %H:%M"):
+            try:
+                dt = datetime.strptime(f"{data_raw} {hora_raw}", fmt).replace(tzinfo=TZ)
+                break
+            except Exception:
+                pass
 
-        if not data_str or not hora_str:
-            skipped_no_datetime += 1
+        if dt is None:
+            continue
+
+        consumo_kwh = parse_float_pt(consumo_raw)
+        periodo = periodo_label(dt)
+
+        rows.append(
+            {
+                "timestamp": dt.isoformat(),
+                "date": dt.strftime("%Y-%m-%d"),
+                "time": dt.strftime("%H:%M"),
+                "periodo": periodo,
+                "consumo_kwh": consumo_kwh,
+                "estado": estado_raw,
+            }
+        )
+
+    rows.sort(key=lambda x: x["timestamp"])
+    return rows
+
+
+def omie_url_for_date(d: datetime) -> str:
+    ymd = d.strftime("%Y%m%d")
+    return f"https://www.omie.es/sites/default/files/dados/AGNO_{d:%Y}/MES_{d:%m}/TXT/marginalpdbcpt_{ymd}.1"
+
+
+def parse_omie_file_for_day(target_day: datetime) -> dict[int, float]:
+    url = omie_url_for_date(target_day)
+    text = fetch_text(url)
+
+    prices_eur_mwh = {}
+    for line in text.splitlines():
+        parts = [p.strip() for p in line.split(";")]
+        if len(parts) < 6:
             continue
 
         try:
-            dt = parse_eredes_datetime(data_str, hora_str)
+            # formato OMIE típico: data;mercado;hora/período;...;preço
+            raw_date = parts[0]
+            raw_period = parts[2]
+            raw_price = parts[-1].replace(",", ".")
+
+            day = None
+            for fmt in ("%d/%m/%Y", "%Y-%m-%d", "%Y%m%d"):
+                try:
+                    day = datetime.strptime(raw_date, fmt).date()
+                    break
+                except Exception:
+                    pass
+
+            if day != target_day.date():
+                continue
+
+            period = int(raw_period)
+            price = float(raw_price)
+            prices_eur_mwh[period] = price
         except Exception:
-            skipped_bad_datetime += 1
             continue
 
-        consumo = parse_float_pt(consumo_str)
+    if len(prices_eur_mwh) not in (24, 96):
+        raise RuntimeError(f"OMIE: número de períodos inesperado para {target_day.date()}: {len(prices_eur_mwh)}")
 
-        rows.append({
-            "datetime": dt,
-            "consumo_kwh": consumo,
-            "estado": estado,
-        })
+    if len(prices_eur_mwh) == 24:
+        expanded = {}
+        for h in range(24):
+            price = prices_eur_mwh.get(h + 1, 0.0)
+            for q in range(4):
+                expanded[h * 4 + q + 1] = price
+        return expanded
 
-    print(f"DEBUG E-REDES: linhas válidas antes de dedup = {len(rows)}")
-    print(f"DEBUG E-REDES: ignoradas sem data/hora = {skipped_no_datetime}")
-    print(f"DEBUG E-REDES: ignoradas por data/hora inválida = {skipped_bad_datetime}")
+    return prices_eur_mwh
 
-    rows.sort(key=lambda x: x["datetime"])
 
-    dedup = {}
+def g9_price_from_omie_eur_mwh(omie_eur_mwh: float, vazio: bool) -> float:
+    omie_eur_kwh = omie_eur_mwh / 1000.0
+    tarifa = TAR_VAZIO if vazio else TAR_FV
+    return (omie_eur_kwh * FADEQ * (1 + PERDAS)) + AC + GGS + tarifa
+
+
+def apply_omie_prices(rows: list[dict]) -> list[dict]:
+    by_day: dict[str, dict[int, float]] = {}
+
+    enriched = []
     for row in rows:
-        dedup[row["datetime"]] = row
+        dt = datetime.fromisoformat(row["timestamp"])
+        day_key = dt.strftime("%Y-%m-%d")
 
-    final_rows = list(sorted(dedup.values(), key=lambda x: x["datetime"]))
-    print(f"DEBUG E-REDES: linhas válidas finais = {len(final_rows)}")
+        if day_key not in by_day:
+            by_day[day_key] = parse_omie_file_for_day(dt)
 
-    if final_rows:
-        print(f"DEBUG E-REDES: primeira leitura = {final_rows[0]['datetime']} | {final_rows[0]['consumo_kwh']}")
-        print(f"DEBUG E-REDES: última leitura = {final_rows[-1]['datetime']} | {final_rows[-1]['consumo_kwh']}")
-    else:
-        print("DEBUG E-REDES: nenhuma leitura válida encontrada.")
+        period_15m = dt.hour * 4 + (dt.minute // 15) + 1
+        omie_price = by_day[day_key].get(period_15m, 0.0)
 
-    return final_rows
+        vazio = row["periodo"] == "Vazio"
+        g9_final = g9_price_from_omie_eur_mwh(omie_price, vazio)
+        custo = row["consumo_kwh"] * g9_final
 
+        new_row = row.copy()
+        new_row["omie_eur_mwh"] = omie_price
+        new_row["g9_eur_kwh"] = g9_final
+        new_row["custo_eur"] = custo
+        enriched.append(new_row)
 
-def count_intervals_by_day(rows: list[dict]) -> dict[date, int]:
-    counts = defaultdict(int)
-    for row in rows:
-        counts[row["datetime"].date()] += 1
-    return dict(counts)
-
-
-def choose_consumption_day(rows: list[dict], today_ref: date) -> tuple[date | None, int, str | None]:
-    if not rows:
-        return None, 0, None
-
-    counts = count_intervals_by_day(rows)
-    previous_day = today_ref - timedelta(days=1)
-    previous_count = counts.get(previous_day, 0)
-
-    if previous_count >= MIN_PREVIOUS_DAY_INTERVALS:
-        return previous_day, previous_count, "previous_day_80"
-
-    eligible_days = [
-        (d, c) for d, c in counts.items()
-        if c >= MIN_FALLBACK_DAY_INTERVALS
-    ]
-    if not eligible_days:
-        return None, 0, None
-
-    eligible_days.sort(key=lambda x: x[0], reverse=True)
-    chosen_day, chosen_count = eligible_days[0]
-    return chosen_day, chosen_count, "fallback_70"
+    return enriched
 
 
-# =========================================================
-# CÁLCULOS
-# =========================================================
-def calc_day_consumption_and_cost(rows: list[dict], target_day: date) -> dict:
-    day_rows = [r for r in rows if r["datetime"].date() == target_day]
+def load_master_df() -> pd.DataFrame:
+    if not os.path.exists(MASTER_FILE):
+        return pd.DataFrame(
+            columns=[
+                "timestamp",
+                "date",
+                "time",
+                "periodo",
+                "consumo_kwh",
+                "estado",
+                "omie_eur_mwh",
+                "g9_eur_kwh",
+                "custo_eur",
+            ]
+        )
 
-    if not day_rows:
+    df = pd.read_csv(MASTER_FILE)
+    if df.empty:
+        return df
+
+    if "timestamp" in df.columns:
+        df["timestamp"] = pd.to_datetime(df["timestamp"], errors="coerce")
+        df = df.dropna(subset=["timestamp"]).copy()
+        df["timestamp"] = df["timestamp"].dt.strftime("%Y-%m-%dT%H:%M:%S%z")
+        df["timestamp"] = df["timestamp"].str.replace(r"(\+..)(..)$", r"\1:\2", regex=True)
+
+    for c in ("consumo_kwh", "omie_eur_mwh", "g9_eur_kwh", "custo_eur"):
+        if c in df.columns:
+            df[c] = pd.to_numeric(df[c], errors="coerce").fillna(0.0)
+
+    return df
+
+
+def update_master(rows: list[dict]) -> pd.DataFrame:
+    incoming = pd.DataFrame(rows)
+    master = load_master_df()
+
+    combined = pd.concat([master, incoming], ignore_index=True)
+
+    if combined.empty:
+        return combined
+
+    combined["timestamp"] = pd.to_datetime(combined["timestamp"], errors="coerce")
+    combined = combined.dropna(subset=["timestamp"]).copy()
+
+    for c in ("consumo_kwh", "omie_eur_mwh", "g9_eur_kwh", "custo_eur"):
+        if c in combined.columns:
+            combined[c] = pd.to_numeric(combined[c], errors="coerce").fillna(0.0)
+
+    # Mantém apenas um registo por timestamp: o último
+    combined = combined.sort_values("timestamp").drop_duplicates(subset=["timestamp"], keep="last")
+
+    combined["date"] = combined["timestamp"].dt.strftime("%Y-%m-%d")
+    combined["time"] = combined["timestamp"].dt.strftime("%H:%M")
+    combined["periodo"] = combined["timestamp"].apply(periodo_label)
+
+    combined = combined.sort_values("timestamp").reset_index(drop=True)
+    combined.to_csv(MASTER_FILE, index=False)
+
+    return combined
+
+
+def pick_best_day(df: pd.DataFrame) -> tuple[pd.Timestamp | None, int]:
+    if df.empty:
+        return None, 0
+
+    temp = df.copy()
+    temp["day"] = temp["timestamp"].dt.floor("D")
+    counts = temp.groupby("day").size().sort_index()
+
+    yesterday = (now_local() - timedelta(days=1)).replace(hour=0, minute=0, second=0, microsecond=0)
+    yesterday = pd.Timestamp(yesterday)
+
+    if yesterday in counts.index and counts.loc[yesterday] >= math.ceil(96 * 0.80):
+        return yesterday, int(counts.loc[yesterday])
+
+    valid = counts[counts > math.floor(96 * 0.70)]
+    if not valid.empty:
+        day = valid.index.max()
+        return day, int(valid.loc[day])
+
+    return None, 0
+
+
+def summarize_day(df: pd.DataFrame, day: pd.Timestamp) -> dict:
+    sub = df[df["timestamp"].dt.floor("D") == day].copy()
+
+    vazio = sub[sub["periodo"] == "Vazio"]
+    fv = sub[sub["periodo"] == "Fora vazio"]
+
+    kv = float(vazio["consumo_kwh"].sum())
+    kf = float(fv["consumo_kwh"].sum())
+    kt = kv + kf
+
+    cv = float(vazio["custo_eur"].sum())
+    cf = float(fv["custo_eur"].sum())
+    ct = cv + cf
+
+    pv = (kv / kt * 100) if kt > 0 else 0.0
+    pf = (kf / kt * 100) if kt > 0 else 0.0
+    pm = (ct / kt) if kt > 0 else 0.0
+
+    return {
+        "day": day,
+        "kwh_vazio": kv,
+        "kwh_fv": kf,
+        "kwh_total": kt,
+        "pct_vazio": pv,
+        "pct_fv": pf,
+        "cost_vazio": cv,
+        "cost_fv": cf,
+        "cost_total": ct,
+        "avg_price": pm,
+    }
+
+
+def summarize_month(df: pd.DataFrame) -> dict:
+    if df.empty:
         return {
-            "day": target_day,
-            "count": 0,
-            "vazio_kwh": 0.0,
-            "fv_kwh": 0.0,
-            "total_kwh": 0.0,
-            "vazio_cost": 0.0,
-            "fv_cost": 0.0,
-            "total_cost": 0.0,
+            "kwh_vazio": 0.0,
+            "kwh_fv": 0.0,
+            "kwh_total": 0.0,
+            "cost_vazio": 0.0,
+            "cost_fv": 0.0,
+            "cost_total": 0.0,
             "avg_price": 0.0,
+            "last_update": None,
         }
 
-    try:
-        omie_prices, omie_used_day = load_omie_day_with_fallback(target_day, max_back_days=3)
-        print(f"OMIE usado para custos do dia {target_day}: {omie_used_day}")
-    except Exception as e:
-        print(f"AVISO: falha ao carregar OMIE de {target_day} para custos: {e}")
-        omie_prices = None
+    latest = df["timestamp"].max()
+    month_df = df[
+        (df["timestamp"].dt.year == latest.year) &
+        (df["timestamp"].dt.month == latest.month)
+    ].copy()
 
-    vazio_kwh = 0.0
-    fv_kwh = 0.0
-    vazio_cost = 0.0
-    fv_cost = 0.0
+    vazio = month_df[month_df["periodo"] == "Vazio"]
+    fv = month_df[month_df["periodo"] == "Fora vazio"]
 
-    for row in day_rows:
-        dt = row["datetime"]
-        kwh = row["consumo_kwh"]
-        vazio = is_vazio(dt)
+    kv = float(vazio["consumo_kwh"].sum())
+    kf = float(fv["consumo_kwh"].sum())
+    kt = kv + kf
 
-        if vazio:
-            vazio_kwh += kwh
-        else:
-            fv_kwh += kwh
+    cv = float(vazio["custo_eur"].sum())
+    cf = float(fv["custo_eur"].sum())
+    ct = cv + cf
 
-        if omie_prices:
-            omie_hour = omie_prices.get(dt.hour)
-            if omie_hour is not None:
-                unit_price = omie_mwh_to_g9_kwh(omie_hour, vazio=vazio)
-                cost = kwh * unit_price
-                if vazio:
-                    vazio_cost += cost
-                else:
-                    fv_cost += cost
-
-    total_kwh = vazio_kwh + fv_kwh
-    total_cost = vazio_cost + fv_cost
-    avg_price = (total_cost / total_kwh) if total_kwh > 0 else 0.0
+    pm = (ct / kt) if kt > 0 else 0.0
 
     return {
-        "day": target_day,
-        "count": len(day_rows),
-        "vazio_kwh": vazio_kwh,
-        "fv_kwh": fv_kwh,
-        "total_kwh": total_kwh,
-        "vazio_cost": vazio_cost,
-        "fv_cost": fv_cost,
-        "total_cost": total_cost,
-        "avg_price": avg_price,
+        "kwh_vazio": kv,
+        "kwh_fv": kf,
+        "kwh_total": kt,
+        "cost_vazio": cv,
+        "cost_fv": cf,
+        "cost_total": ct,
+        "avg_price": pm,
+        "last_update": latest,
     }
 
 
-def calc_month_accumulated(rows: list[dict], today_ref: date) -> dict:
-    month_rows = [
-        r for r in rows
-        if r["datetime"].year == today_ref.year and r["datetime"].month == today_ref.month
-    ]
+def get_today_g9_prices() -> tuple[float, float, float]:
+    today = now_local().replace(hour=0, minute=0, second=0, microsecond=0)
+    omie_today = parse_omie_file_for_day(today)
 
-    vazio_kwh = 0.0
-    fv_kwh = 0.0
-    vazio_cost = 0.0
-    fv_cost = 0.0
-    omie_cache = {}
+    vazio_prices = []
+    fv_prices = []
 
-    for row in month_rows:
-        dt = row["datetime"]
-        kwh = row["consumo_kwh"]
-        vazio = is_vazio(dt)
+    for period, omie_eur_mwh in sorted(omie_today.items()):
+        idx0 = period - 1
+        hour = idx0 // 4
+        minute = (idx0 % 4) * 15
+        dt = today.replace(hour=hour, minute=minute)
 
-        if vazio:
-            vazio_kwh += kwh
+        final_price = g9_price_from_omie_eur_mwh(omie_eur_mwh, is_vazio(dt))
+        if is_vazio(dt):
+            vazio_prices.append(final_price)
         else:
-            fv_kwh += kwh
+            fv_prices.append(final_price)
 
-        day = dt.date()
-        if day not in omie_cache:
-            try:
-                prices, used_day = load_omie_day_with_fallback(day, max_back_days=3)
-                omie_cache[day] = prices
-                if used_day != day:
-                    print(f"OMIE fallback no acumulado mensal para {day}: usado {used_day}")
-            except Exception as e:
-                print(f"AVISO: falha ao carregar OMIE de {day} no acumulado mensal: {e}")
-                omie_cache[day] = None
+    avg_vazio = sum(vazio_prices) / len(vazio_prices) if vazio_prices else 0.0
+    avg_fv = sum(fv_prices) / len(fv_prices) if fv_prices else 0.0
 
-        prices = omie_cache[day]
-        if prices:
-            omie_hour = prices.get(dt.hour)
-            if omie_hour is not None:
-                unit_price = omie_mwh_to_g9_kwh(omie_hour, vazio=vazio)
-                cost = kwh * unit_price
-                if vazio:
-                    vazio_cost += cost
-                else:
-                    fv_cost += cost
+    yesterday = today - timedelta(days=1)
+    omie_yesterday = parse_omie_file_for_day(yesterday)
+    omie_avg_yesterday = sum(omie_yesterday.values()) / len(omie_yesterday) if omie_yesterday else 0.0
 
-    total_kwh = vazio_kwh + fv_kwh
-    total_cost = vazio_cost + fv_cost
-    avg_price = (total_cost / total_kwh) if total_kwh > 0 else 0.0
-    last_dt = safe_max_dt(month_rows)
-
-    return {
-        "vazio_kwh": vazio_kwh,
-        "fv_kwh": fv_kwh,
-        "total_kwh": total_kwh,
-        "vazio_cost": vazio_cost,
-        "fv_cost": fv_cost,
-        "total_cost": total_cost,
-        "avg_price": avg_price,
-        "last_dt": last_dt,
-    }
+    return omie_avg_yesterday, avg_vazio, avg_fv
 
 
-# =========================================================
-# TELEGRAM
-# =========================================================
-def send_telegram_message(text: str):
-    if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_ID:
-        print("Telegram não configurado. Mensagem gerada:")
+def melhor_janela_para_consumos(preco_vazio: float, preco_fv: float) -> str:
+    if preco_vazio <= 0 or preco_fv <= 0:
+        return "💡 Melhor janela para consumos: sem dados válidos para sugestão."
+
+    diff_pct = ((preco_fv - preco_vazio) / preco_fv) * 100 if preco_fv > 0 else 0.0
+
+    if preco_vazio < preco_fv:
+        return f"💡 Melhor janela para consumos: vazio (≈ {diff_pct:.0f}% mais barato do que fora vazio)."
+
+    if preco_vazio > preco_fv:
+        return "💡 Melhor janela para consumos: fora vazio, hoje está mais barato do que o habitual."
+
+    return "💡 Melhor janela para consumos: preços muito próximos entre períodos."
+
+
+def send_telegram_message(text: str) -> None:
+    if not TELEGRAM_TOKEN or not TELEGRAM_CHAT_ID:
+        print("Telegram não configurado. Mensagem:")
         print(text)
         return
 
-    url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
-    payload = urllib.parse.urlencode({
-        "chat_id": TELEGRAM_CHAT_ID,
-        "text": text,
-    }).encode("utf-8")
-
-    req = urllib.request.Request(url, data=payload, method="POST")
-    with urllib.request.urlopen(req, timeout=30) as resp:
-        body = resp.read().decode("utf-8", errors="replace")
-        print("Telegram OK:", body)
-
-
-def build_message(
-    today_ref: date,
-    omie_reference_day_requested: date,
-    omie_reference_day_used: date,
-    day_stats: dict | None,
-    month_stats: dict,
-    omie_avg: float,
-    g9_vazio: float,
-    g9_fv: float,
-) -> str:
-    lines = []
-
-    lines.append(f"📅 G9 - {today_ref.strftime('%d/%m/%Y')}")
-    lines.append("")
-
-    if omie_reference_day_requested == omie_reference_day_used:
-        lines.append(f"OMIE ({omie_reference_day_used.strftime('%d/%m/%Y')}): {format_num(omie_avg, 1)} €/MWh")
-    else:
-        lines.append(f"OMIE ({omie_reference_day_used.strftime('%d/%m/%Y')} - fallback): {format_num(omie_avg, 1)} €/MWh")
-
-    lines.append("")
-    lines.append("⚡ G9 Indexado")
-    lines.append(f"• Vazio: {format_num(g9_vazio, 3)} €/kWh")
-    lines.append(f"• Fora vazio: {format_num(g9_fv, 3)} €/kWh")
-
-    if day_stats:
-        label_day = day_stats["day"].strftime("%d/%m/%Y")
-        total_kwh = day_stats["total_kwh"]
-
-        pct_vazio = (day_stats["vazio_kwh"] / total_kwh * 100) if total_kwh > 0 else 0.0
-        pct_fv = (day_stats["fv_kwh"] / total_kwh * 100) if total_kwh > 0 else 0.0
-
-        lines.append("")
-        lines.append(f"📊 Consumos ({label_day})")
-        lines.append(f"• Vazio: {format_kwh(day_stats['vazio_kwh'])} kWh ({format_num(pct_vazio, 1)}%)")
-        lines.append(f"• Fora vazio: {format_kwh(day_stats['fv_kwh'])} kWh ({format_num(pct_fv, 1)}%)")
-        lines.append(f"• Total: {format_kwh(day_stats['total_kwh'])} kWh")
-
-        lines.append("")
-        lines.append("💰 Custos reais")
-        lines.append(f"• Vazio: {format_eur(day_stats['vazio_cost'], 2)} €")
-        lines.append(f"• Fora vazio: {format_eur(day_stats['fv_cost'], 2)} €")
-        lines.append(f"• Total: {format_eur(day_stats['total_cost'], 2)} €")
-        lines.append(f"• Preço médio real: {format_num(day_stats['avg_price'], 3)} €/kWh")
-
-    if month_stats["last_dt"]:
-        lu = month_stats["last_dt"].strftime("%d/%m/%Y às %H:%M")
-    else:
-        lu = "sem dados"
-
-    lines.append("")
-    lines.append(f"📆 Acumulado do mês (última atualização: {lu})")
-    lines.append(f"• Vazio: {format_kwh(month_stats['vazio_kwh'])} kWh")
-    lines.append(f"• Fora vazio: {format_kwh(month_stats['fv_kwh'])} kWh")
-    lines.append(f"• Total: {format_kwh(month_stats['total_kwh'])} kWh")
-
-    lines.append("")
-    lines.append(f"💸 Acumulado real (última atualização: {lu})")
-    lines.append(f"• Vazio: {format_eur(month_stats['vazio_cost'], 2)} €")
-    lines.append(f"• Fora vazio: {format_eur(month_stats['fv_cost'], 2)} €")
-    lines.append(f"• Total: {format_eur(month_stats['total_cost'], 2)} €")
-    lines.append(f"• Preço médio real: {format_num(month_stats['avg_price'], 3)} €/kWh")
-
-    return "\n".join(lines)
+    url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
+    r = requests.post(
+        url,
+        data={
+            "chat_id": TELEGRAM_CHAT_ID,
+            "text": text,
+        },
+        timeout=60,
+    )
+    r.raise_for_status()
 
 
-# =========================================================
-# MAIN
-# =========================================================
+def build_message(day_summary: dict, month_summary: dict, omie_yesterday_avg: float, g9_vazio: float, g9_fv: float) -> str:
+    ref_date = now_local()
+    day = pd.Timestamp(day_summary["day"]).to_pydatetime().replace(tzinfo=TZ)
+    last_upd = month_summary["last_update"]
+    last_upd_str = fmt_dt(last_upd.to_pydatetime().replace(tzinfo=TZ)) if last_upd is not None else "-"
+
+    sugestao = melhor_janela_para_consumos(g9_vazio, g9_fv)
+
+    msg = (
+        f"📅 G9 - {fmt_date(ref_date)}\n\n"
+        f"OMIE ({fmt_date(ref_date - timedelta(days=1))}): {omie_yesterday_avg:.1f} €/MWh\n\n"
+        f"⚡ G9 Indexado\n"
+        f"• Vazio: {g9_vazio:.3f} €/kWh\n"
+        f"• Fora vazio: {g9_fv:.3f} €/kWh\n"
+        f"{sugestao}\n\n"
+        f"📊 Consumos ({fmt_date(day)})\n"
+        f"• Vazio: {day_summary['kwh_vazio']:.1f} kWh ({day_summary['pct_vazio']:.1f}%)\n"
+        f"• Fora vazio: {day_summary['kwh_fv']:.1f} kWh ({day_summary['pct_fv']:.1f}%)\n"
+        f"• Total: {day_summary['kwh_total']:.1f} kWh\n\n"
+        f"💰 Custos reais\n"
+        f"• Vazio: {day_summary['cost_vazio']:.2f} €\n"
+        f"• Fora vazio: {day_summary['cost_fv']:.2f} €\n"
+        f"• Total: {day_summary['cost_total']:.2f} €\n"
+        f"• Preço médio real: {day_summary['avg_price']:.3f} €/kWh\n\n"
+        f"📅 Acumulado do mês (última atualização: {last_upd_str})\n"
+        f"• Vazio: {month_summary['kwh_vazio']:.1f} kWh\n"
+        f"• Fora vazio: {month_summary['kwh_fv']:.1f} kWh\n"
+        f"• Total: {month_summary['kwh_total']:.1f} kWh\n\n"
+        f"💸 Acumulado real (última atualização: {last_upd_str})\n"
+        f"• Vazio: {month_summary['cost_vazio']:.2f} €\n"
+        f"• Fora vazio: {month_summary['cost_fv']:.2f} €\n"
+        f"• Total: {month_summary['cost_total']:.2f} €\n"
+        f"• Preço médio real: {month_summary['avg_price']:.3f} €/kWh"
+    )
+    return msg
+
+
 def main():
-    today_ref = datetime.now().date()
-
-    omie_reference_day_requested = today_ref - timedelta(days=1)
-    omie_prices, omie_reference_day_used = load_omie_day_with_fallback(
-        omie_reference_day_requested,
-        max_back_days=5
-    )
-    omie_avg, g9_vazio, g9_fv = calc_g9_prices_from_omie(omie_prices)
-
+    print("A carregar dados E-REDES...")
     rows = load_eredes_15m_data()
+    if not rows:
+        raise RuntimeError("Sem dados E-REDES.")
 
-    chosen_day, chosen_count, chosen_mode = choose_consumption_day(rows, today_ref)
+    print(f"Linhas E-REDES lidas: {len(rows)}")
 
-    if chosen_day:
-        print(
-            f"Dia escolhido para consumos: {chosen_day} | "
-            f"intervalos={chosen_count} | modo={chosen_mode}"
-        )
-        day_stats = calc_day_consumption_and_cost(rows, chosen_day)
-    else:
-        print("Nenhum dia elegível encontrado para a secção de consumos.")
-        day_stats = None
+    print("A aplicar preços OMIE/G9...")
+    enriched = apply_omie_prices(rows)
 
-    month_stats = calc_month_accumulated(rows, today_ref)
+    print("A atualizar master.csv com deduplicação por timestamp...")
+    master = update_master(enriched)
 
-    msg = build_message(
-        today_ref=today_ref,
-        omie_reference_day_requested=omie_reference_day_requested,
-        omie_reference_day_used=omie_reference_day_used,
-        day_stats=day_stats,
-        month_stats=month_stats,
-        omie_avg=omie_avg,
-        g9_vazio=g9_vazio,
-        g9_fv=g9_fv,
-    )
+    if master.empty:
+        raise RuntimeError("master.csv ficou vazio.")
 
-    print(msg)
+    master["timestamp"] = pd.to_datetime(master["timestamp"], errors="coerce")
+    master = master.dropna(subset=["timestamp"]).copy()
+
+    best_day, intervals = pick_best_day(master)
+    if best_day is None:
+        if not FORCE_RUN:
+            raise RuntimeError("Não encontrei um dia válido com dados suficientes.")
+        best_day = master["timestamp"].dt.floor("D").max()
+
+    print(f"Dia escolhido: {best_day.date()} | intervalos: {intervals}")
+
+    day_summary = summarize_day(master, best_day)
+    month_summary = summarize_month(master)
+
+    print("A obter preços G9 médios do dia...")
+    omie_yesterday_avg, g9_vazio, g9_fv = get_today_g9_prices()
+
+    msg = build_message(day_summary, month_summary, omie_yesterday_avg, g9_vazio, g9_fv)
+
+    print("A enviar mensagem Telegram...")
     send_telegram_message(msg)
+    print("Concluído.")
 
 
 if __name__ == "__main__":
