@@ -34,6 +34,7 @@ OMIE_DIRECT_URL_TEMPLATE = "https://www.omie.es/sites/default/files/dados/AGNO_{
 OMIE_DOWNLOAD_URL_TEMPLATE_PT = "https://www.omie.es/pt/file-download?parents=marginalpdbcpt&filename={filename}"
 OMIE_DOWNLOAD_URL_TEMPLATE_EN = "https://www.omie.es/en/file-download?parents=marginalpdbcpt&filename={filename}"
 
+
 # =========================================================
 # HELPERS
 # =========================================================
@@ -151,7 +152,7 @@ def parse_omie_prices(text: str) -> dict[int, float]:
     - formato antigo: 24 linhas (1..24)
     - formato novo: 96 períodos de 15 min (1..96)
 
-    Devolve sempre dict {0..23: preço_médio_hora}
+    Devolve sempre dict {0..23: preço médio por hora}
     """
     hour_buckets = defaultdict(list)
 
@@ -165,8 +166,6 @@ def parse_omie_prices(text: str) -> dict[int, float]:
             continue
 
         parts = [p.strip() for p in line.split(";")]
-
-        # Esperado: YYYY;MM;DD;periodo;preco;preco;
         if len(parts) < 5:
             continue
 
@@ -175,7 +174,6 @@ def parse_omie_prices(text: str) -> dict[int, float]:
 
         if not re.fullmatch(r"\d{1,3}", period_raw):
             continue
-
         if not re.fullmatch(r"-?\d+(?:\.\d+)?", price_raw):
             continue
 
@@ -190,7 +188,6 @@ def parse_omie_prices(text: str) -> dict[int, float]:
             hour_buckets[hour].append(price)
 
     prices = {}
-
     for hour in range(24):
         vals = hour_buckets.get(hour, [])
         if not vals:
@@ -600,11 +597,11 @@ def build_message(
     today_ref: date,
     omie_reference_day_requested: date,
     omie_reference_day_used: date,
+    day_stats: dict | None,
+    month_stats: dict,
     omie_avg: float,
     g9_vazio: float,
     g9_fv: float,
-    day_stats: dict | None,
-    month_stats: dict,
 ) -> str:
     lines = []
 
@@ -623,11 +620,15 @@ def build_message(
 
     if day_stats:
         label_day = day_stats["day"].strftime("%d/%m/%Y")
+        total_kwh = day_stats["total_kwh"]
+
+        pct_vazio = (day_stats["vazio_kwh"] / total_kwh * 100) if total_kwh > 0 else 0.0
+        pct_fv = (day_stats["fv_kwh"] / total_kwh * 100) if total_kwh > 0 else 0.0
 
         lines.append("")
         lines.append(f"📊 Consumos ({label_day})")
-        lines.append(f"• Vazio: {format_kwh(day_stats['vazio_kwh'])} kWh")
-        lines.append(f"• Fora vazio: {format_kwh(day_stats['fv_kwh'])} kWh")
+        lines.append(f"• Vazio: {format_kwh(day_stats['vazio_kwh'])} kWh ({format_num(pct_vazio, 1)}%)")
+        lines.append(f"• Fora vazio: {format_kwh(day_stats['fv_kwh'])} kWh ({format_num(pct_fv, 1)}%)")
         lines.append(f"• Total: {format_kwh(day_stats['total_kwh'])} kWh")
 
         lines.append("")
@@ -695,11 +696,11 @@ def main():
         today_ref=today_ref,
         omie_reference_day_requested=omie_reference_day_requested,
         omie_reference_day_used=omie_reference_day_used,
+        day_stats=day_stats,
+        month_stats=month_stats,
         omie_avg=omie_avg,
         g9_vazio=g9_vazio,
         g9_fv=g9_fv,
-        day_stats=day_stats,
-        month_stats=month_stats,
     )
 
     print(msg)
