@@ -87,44 +87,34 @@ def detect_delimiter(text: str) -> str:
 
 
 def find_header_row(lines: list[str]) -> int:
-    for i, line in enumerate(lines[:30]):
+    for i, line in enumerate(lines[:40]):
         low = line.lower()
         if "data" in low and "hora" in low and "consumo" in low:
             return i
     return 0
 
 
-def load_eredes_15m_data() -> list[dict]:
-    url = normalize_google_sheets_url(EREDES_CSV_URL)
-    if not url:
-        raise RuntimeError("EREDES_CSV_URL vazio.")
-
-    if "docs.google.com" in url:
-        sep = "&" if "?" in url else "?"
-        url = f"{url}{sep}t={int(now_local().timestamp())}"
-
-    text = fetch_text(url)
-    lines = text.splitlines()
-    if not lines:
-        return []
-
-    delimiter = detect_delimiter(text)
-    header_row = find_header_row(lines)
-    cleaned = "\n".join(lines[header_row:])
-
-    df = pd.read_csv(io.StringIO(cleaned), sep=delimiter, dtype=str)
+def normalize_eredes_dataframe(df: pd.DataFrame) -> pd.DataFrame:
+    df = df.copy()
     df.columns = [str(c).strip() for c in df.columns]
 
-    col_data = next((c for c in df.columns if c.lower() == "data"), None)
-    col_hora = next((c for c in df.columns if c.lower() == "hora"), None)
-    col_consumo = next((c for c in df.columns if c.lower() == "consumo"), None)
-    col_estado = next((c for c in df.columns if c.lower() == "estado"), None)
+    col_data = next((c for c in df.columns if c.strip().lower() == "data"), None)
+    col_hora = next((c for c in df.columns if c.strip().lower() == "hora"), None)
+    col_consumo = next(
+        (
+            c for c in df.columns
+            if "consumo registado" in c.strip().lower()
+            or c.strip().lower() == "consumo"
+            or c.strip().lower() == "consumo registado (kw)"
+        ),
+        None
+    )
+    col_estado = next((c for c in df.columns if c.strip().lower() == "estado"), None)
 
     if not col_data or not col_hora or not col_consumo:
         raise RuntimeError(f"Não encontrei as colunas esperadas. Colunas: {list(df.columns)}")
 
     rows = []
-
     for _, r in df.iterrows():
         data_raw = str(r.get(col_data, "")).strip()
         hora_raw = str(r.get(col_hora, "")).strip()
@@ -147,7 +137,7 @@ def load_eredes_15m_data() -> list[dict]:
 
         rows.append(
             {
-                "timestamp": dt.isoformat(),
+                "timestamp": dt,
                 "date": dt.strftime("%Y-%m-%d"),
                 "time": dt.strftime("%H:%M"),
                 "periodo": periodo_label(dt),
@@ -156,6 +146,35 @@ def load_eredes_15m_data() -> list[dict]:
             }
         )
 
+    return pd.DataFrame(rows)
+
+
+def load_eredes_15m_data() -> list[dict]:
+    url = normalize_google_sheets_url(EREDES_CSV_URL)
+    if not url:
+        raise RuntimeError("EREDES_CSV_URL vazio.")
+
+    if "docs.google.com" in url:
+        sep = "&" if "?" in url else "?"
+        url = f"{url}{sep}t={int(now_local().timestamp())}"
+
+    text = fetch_text(url)
+    lines = text.splitlines()
+    if not lines:
+        return []
+
+    delimiter = detect_delimiter(text)
+    header_row = find_header_row(lines)
+    cleaned = "\n".join(lines[header_row:])
+
+    df = pd.read_csv(io.StringIO(cleaned), sep=delimiter, dtype=str)
+    norm = normalize_eredes_dataframe(df)
+
+    if norm.empty:
+        return []
+
+    norm["timestamp"] = norm["timestamp"].apply(lambda x: x.isoformat())
+    rows = norm.to_dict(orient="records")
     rows.sort(key=lambda x: x["timestamp"])
     return rows
 
@@ -251,19 +270,41 @@ def load_master_df() -> pd.DataFrame:
             "omie_eur_mwh", "g9_eur_kwh", "custo_eur"
         ])
 
-    df = pd.read_excel(MASTER_FILE, engine="openpyxl")
-    if df.empty:
-        return df
+    raw = pd.read_excel(MASTER_FILE, engine="openpyxl")
+    if raw.empty:
+        return raw
 
-    if "timestamp" in df.columns:
+    raw.columns = [str(c).strip() for c in raw.columns]
+
+    if "timestamp" in raw.columns:
+        df = raw.copy()
         df["timestamp"] = pd.to_datetime(df["timestamp"], errors="coerce")
         df = df.dropna(subset=["timestamp"]).copy()
+    else:
+        # ficheiro ainda em formato cru E-REDES
+        df = normalize_eredes_dataframe(raw)
 
     for c in ["consumo_kwh", "omie_eur_mwh", "g9_eur_kwh", "custo_eur"]:
-        if c in df.columns:
-            df[c] = pd.to_numeric(df[c], errors="coerce").fillna(0.0)
+        if c not in df.columns:
+            df[c] = 0.0
+        df[c] = pd.to_numeric(df[c], errors="coerce").fillna(0.0)
 
-    return df
+    if "estado" not in df.columns:
+        df["estado"] = ""
+
+    if "date" not in df.columns:
+        df["date"] = df["timestamp"].dt.strftime("%Y-%m-%d")
+
+    if "time" not in df.columns:
+        df["time"] = df["timestamp"].dt.strftime("%H:%M")
+
+    if "periodo" not in df.columns:
+        df["periodo"] = df["timestamp"].apply(periodo_label)
+
+    return df[[
+        "timestamp", "date", "time", "periodo", "consumo_kwh", "estado",
+        "omie_eur_mwh", "g9_eur_kwh", "custo_eur"
+    ]].copy()
 
 
 def update_master(rows: list[dict]) -> pd.DataFrame:
@@ -278,7 +319,12 @@ def update_master(rows: list[dict]) -> pd.DataFrame:
     combined = combined.dropna(subset=["timestamp"]).copy()
 
     for c in ["consumo_kwh", "omie_eur_mwh", "g9_eur_kwh", "custo_eur"]:
+        if c not in combined.columns:
+            combined[c] = 0.0
         combined[c] = pd.to_numeric(combined[c], errors="coerce").fillna(0.0)
+
+    if "estado" not in combined.columns:
+        combined["estado"] = ""
 
     combined = combined.sort_values("timestamp")
     combined = combined.drop_duplicates(subset=["timestamp"], keep="last")
@@ -287,9 +333,12 @@ def update_master(rows: list[dict]) -> pd.DataFrame:
     combined["time"] = combined["timestamp"].dt.strftime("%H:%M")
     combined["periodo"] = combined["timestamp"].apply(periodo_label)
 
-    combined = combined.sort_values("timestamp").reset_index(drop=True)
-    combined.to_excel(MASTER_FILE, index=False, engine="openpyxl")
+    combined = combined[[
+        "timestamp", "date", "time", "periodo", "consumo_kwh", "estado",
+        "omie_eur_mwh", "g9_eur_kwh", "custo_eur"
+    ]].sort_values("timestamp").reset_index(drop=True)
 
+    combined.to_excel(MASTER_FILE, index=False, engine="openpyxl")
     return combined
 
 
