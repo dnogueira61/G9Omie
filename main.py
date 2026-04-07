@@ -2,7 +2,6 @@ import os
 import io
 import csv
 import math
-import re
 from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
 
@@ -51,10 +50,13 @@ def normalize_google_sheets_url(url: str) -> str:
             base = url.split("/edit")[0]
         else:
             base = url
+
         if "gid=" in url:
             gid = url.split("gid=")[-1].split("&")[0]
             return f"{base}/export?format=csv&gid={gid}"
+
         return f"{base}/export?format=csv"
+
     return url
 
 
@@ -108,7 +110,7 @@ def normalize_eredes_dataframe(df: pd.DataFrame) -> pd.DataFrame:
             or c.strip().lower() == "consumo"
             or c.strip().lower() == "consumo registado (kw)"
         ),
-        None
+        None,
     )
     col_estado = next((c for c in df.columns if c.strip().lower() == "estado"), None)
 
@@ -116,6 +118,7 @@ def normalize_eredes_dataframe(df: pd.DataFrame) -> pd.DataFrame:
         raise RuntimeError(f"Não encontrei as colunas esperadas. Colunas: {list(df.columns)}")
 
     rows = []
+
     for _, r in df.iterrows():
         data_raw = str(r.get(col_data, "")).strip()
         hora_raw = str(r.get(col_hora, "")).strip()
@@ -210,7 +213,7 @@ def parse_omie_file_for_day(target_day: datetime) -> dict[int, float]:
             f"Não foi possível obter OMIE para {target_day.strftime('%Y-%m-%d')}. Último erro: {last_error}"
         )
 
-    prices = {}
+    prices: dict[int, float] = {}
     preview = []
 
     for line in text.splitlines():
@@ -223,11 +226,10 @@ def parse_omie_file_for_day(target_day: datetime) -> dict[int, float]:
 
         parts = [p.strip() for p in line.split(";")]
 
-        # ignorar cabeçalho
         if not parts or parts[0].upper() == "MARGINALPDBCPT":
             continue
 
-        # formato esperado:
+        # formato real:
         # 2026;04;01;1;9.17;9.17;
         if len(parts) >= 6:
             try:
@@ -261,13 +263,6 @@ def parse_omie_file_for_day(target_day: datetime) -> dict[int, float]:
     raise RuntimeError(
         f"OMIE com número de períodos inesperado em {target_day.date()}: {len(prices)}\n"
         f"Primeiras linhas do ficheiro:\n" + "\n".join(preview)
-    )
-
-    # ajuda a perceber formato real
-    preview = "\n".join(text.splitlines()[:15])
-    raise RuntimeError(
-        f"OMIE com número de períodos inesperado em {target_day.date()}: {len(prices)}\n"
-        f"Primeiras linhas do ficheiro:\n{preview}"
     )
 
 
@@ -305,10 +300,19 @@ def apply_omie_prices(rows: list[dict]) -> list[dict]:
 
 def load_master_df() -> pd.DataFrame:
     if not os.path.exists(MASTER_FILE):
-        return pd.DataFrame(columns=[
-            "timestamp", "date", "time", "periodo", "consumo_kwh", "estado",
-            "omie_eur_mwh", "g9_eur_kwh", "custo_eur"
-        ])
+        return pd.DataFrame(
+            columns=[
+                "timestamp",
+                "date",
+                "time",
+                "periodo",
+                "consumo_kwh",
+                "estado",
+                "omie_eur_mwh",
+                "g9_eur_kwh",
+                "custo_eur",
+            ]
+        )
 
     raw = pd.read_excel(MASTER_FILE, engine="openpyxl")
     if raw.empty:
@@ -319,12 +323,8 @@ def load_master_df() -> pd.DataFrame:
     if "timestamp" in raw.columns:
         df = raw.copy()
         df["timestamp"] = pd.to_datetime(df["timestamp"], errors="coerce")
-df = df.dropna(subset=["timestamp"]).copy()
-
-if getattr(df["timestamp"].dt, "tz", None) is not None:
-    df["timestamp"] = df["timestamp"].dt.tz_localize(None)
+        df = df.dropna(subset=["timestamp"]).copy()
     else:
-        # ficheiro ainda em formato cru E-REDES
         df = normalize_eredes_dataframe(raw)
 
     for c in ["consumo_kwh", "omie_eur_mwh", "g9_eur_kwh", "custo_eur"]:
@@ -344,25 +344,37 @@ if getattr(df["timestamp"].dt, "tz", None) is not None:
     if "periodo" not in df.columns:
         df["periodo"] = df["timestamp"].apply(periodo_label)
 
-    return df[[
-        "timestamp", "date", "time", "periodo", "consumo_kwh", "estado",
-        "omie_eur_mwh", "g9_eur_kwh", "custo_eur"
-    ]].copy()
+    # Excel não suporta timezone; internamente deixamos naive
+    if pd.api.types.is_datetime64_any_dtype(df["timestamp"]):
+        try:
+            df["timestamp"] = df["timestamp"].dt.tz_localize(None)
+        except TypeError:
+            pass
+
+    return df[
+        [
+            "timestamp",
+            "date",
+            "time",
+            "periodo",
+            "consumo_kwh",
+            "estado",
+            "omie_eur_mwh",
+            "g9_eur_kwh",
+            "custo_eur",
+        ]
+    ].copy()
 
 
-combined = combined[[
-    "timestamp", "date", "time", "periodo", "consumo_kwh", "estado",
-    "omie_eur_mwh", "g9_eur_kwh", "custo_eur"
-]].sort_values("timestamp").reset_index(drop=True)
+def update_master(rows: list[dict]) -> pd.DataFrame:
+    incoming = pd.DataFrame(rows)
+    master = load_master_df()
 
-# Excel não aceita datetimes com timezone
-combined["timestamp"] = pd.to_datetime(combined["timestamp"], errors="coerce")
-combined["timestamp"] = combined["timestamp"].dt.tz_localize(None)
+    combined = pd.concat([master, incoming], ignore_index=True)
+    if combined.empty:
+        return combined
 
-combined.to_excel(MASTER_FILE, index=False, engine="openpyxl")
-return combined
-
-    combined["timestamp"] = pd.to_datetime(combined["timestamp"], errors="coerce")
+    combined["timestamp"] = pd.to_datetime(combined["timestamp"], errors="coerce", utc=True)
     combined = combined.dropna(subset=["timestamp"]).copy()
 
     for c in ["consumo_kwh", "omie_eur_mwh", "g9_eur_kwh", "custo_eur"]:
@@ -376,14 +388,26 @@ return combined
     combined = combined.sort_values("timestamp")
     combined = combined.drop_duplicates(subset=["timestamp"], keep="last")
 
+    # converter para hora local e remover timezone para gravar em Excel
+    combined["timestamp"] = combined["timestamp"].dt.tz_convert("Europe/Lisbon")
     combined["date"] = combined["timestamp"].dt.strftime("%Y-%m-%d")
     combined["time"] = combined["timestamp"].dt.strftime("%H:%M")
     combined["periodo"] = combined["timestamp"].apply(periodo_label)
+    combined["timestamp"] = combined["timestamp"].dt.tz_localize(None)
 
-    combined = combined[[
-        "timestamp", "date", "time", "periodo", "consumo_kwh", "estado",
-        "omie_eur_mwh", "g9_eur_kwh", "custo_eur"
-    ]].sort_values("timestamp").reset_index(drop=True)
+    combined = combined[
+        [
+            "timestamp",
+            "date",
+            "time",
+            "periodo",
+            "consumo_kwh",
+            "estado",
+            "omie_eur_mwh",
+            "g9_eur_kwh",
+            "custo_eur",
+        ]
+    ].sort_values("timestamp").reset_index(drop=True)
 
     combined.to_excel(MASTER_FILE, index=False, engine="openpyxl")
     return combined
@@ -398,7 +422,7 @@ def pick_best_day(df: pd.DataFrame) -> tuple[pd.Timestamp | None, int]:
     counts = temp.groupby("day").size().sort_index()
 
     yesterday = pd.Timestamp(
-        (now_local() - timedelta(days=1)).replace(hour=0, minute=0, second=0, microsecond=0)
+        (now_local() - timedelta(days=1)).replace(hour=0, minute=0, second=0, microsecond=0).replace(tzinfo=None)
     )
 
     if yesterday in counts.index and counts.loc[yesterday] >= math.ceil(96 * 0.80):
@@ -443,15 +467,20 @@ def summarize_day(df: pd.DataFrame, day: pd.Timestamp) -> dict:
 def summarize_month(df: pd.DataFrame) -> dict:
     if df.empty:
         return {
-            "kwh_vazio": 0.0, "kwh_fv": 0.0, "kwh_total": 0.0,
-            "cost_vazio": 0.0, "cost_fv": 0.0, "cost_total": 0.0,
-            "avg_price": 0.0, "last_update": None,
+            "kwh_vazio": 0.0,
+            "kwh_fv": 0.0,
+            "kwh_total": 0.0,
+            "cost_vazio": 0.0,
+            "cost_fv": 0.0,
+            "cost_total": 0.0,
+            "avg_price": 0.0,
+            "last_update": None,
         }
 
     latest = df["timestamp"].max()
     month_df = df[
-        (df["timestamp"].dt.year == latest.year) &
-        (df["timestamp"].dt.month == latest.month)
+        (df["timestamp"].dt.year == latest.year)
+        & (df["timestamp"].dt.month == latest.month)
     ].copy()
 
     vazio = month_df[month_df["periodo"] == "Vazio"]
@@ -504,6 +533,7 @@ def build_best_windows(slots: list[dict]) -> str:
             groups.append((start, prev + 1))
             start = h
             prev = h
+
     groups.append((start, prev + 1))
 
     def fmt_range(a: int, b: int) -> str:
@@ -534,10 +564,7 @@ def get_today_g9_prices_and_windows() -> tuple[float, float, float, str]:
         else:
             fv_prices.append(final_price)
 
-        slots.append({
-            "dt": dt,
-            "price": final_price
-        })
+        slots.append({"dt": dt, "price": final_price})
 
     omie_yesterday = parse_omie_file_for_day(today - timedelta(days=1))
     omie_yesterday_avg = sum(omie_yesterday.values()) / len(omie_yesterday) if omie_yesterday else 0.0
@@ -559,7 +586,14 @@ def send_telegram_message(text: str) -> None:
     r.raise_for_status()
 
 
-def build_message(day_summary: dict, month_summary: dict, omie_yesterday_avg: float, g9_vazio: float, g9_fv: float, janela: str) -> str:
+def build_message(
+    day_summary: dict,
+    month_summary: dict,
+    omie_yesterday_avg: float,
+    g9_vazio: float,
+    g9_fv: float,
+    janela: str,
+) -> str:
     ref_date = now_local()
     day = pd.Timestamp(day_summary["day"]).to_pydatetime()
     last_upd = month_summary["last_update"]
@@ -604,7 +638,7 @@ def main():
     print("A aplicar preços OMIE/G9...")
     enriched = apply_omie_prices(rows)
 
-    print("A atualizar eredes_master.xlsx...")
+    print(f"A atualizar {MASTER_FILE}...")
     master = update_master(enriched)
 
     master["timestamp"] = pd.to_datetime(master["timestamp"], errors="coerce")
