@@ -6,7 +6,6 @@ import time
 import math
 import urllib.request
 import urllib.parse
-import urllib.error
 from datetime import datetime, timedelta, date
 from collections import defaultdict
 
@@ -31,9 +30,8 @@ MIN_FALLBACK_DAY_RATIO = 0.70
 MIN_PREVIOUS_DAY_INTERVALS = math.ceil(EXPECTED_INTERVALS_PER_DAY * MIN_PREVIOUS_DAY_RATIO)   # 77
 MIN_FALLBACK_DAY_INTERVALS = math.floor(EXPECTED_INTERVALS_PER_DAY * MIN_FALLBACK_DAY_RATIO) + 1  # 68
 
-# URLs OMIE
 OMIE_DIRECT_URL_TEMPLATE = "https://www.omie.es/sites/default/files/dados/AGNO_{year}/MES_{month}/TXT/{filename}"
-OMIE_DOWNLOAD_URL_TEMPLATE = "https://www.omie.es/pt/file-download?parents=marginalpdbcpt&filename={filename}"
+OMIE_DOWNLOAD_URL_TEMPLATE_PT = "https://www.omie.es/pt/file-download?parents=marginalpdbcpt&filename={filename}"
 OMIE_DOWNLOAD_URL_TEMPLATE_EN = "https://www.omie.es/en/file-download?parents=marginalpdbcpt&filename={filename}"
 
 # =========================================================
@@ -52,11 +50,6 @@ def fetch_bytes(url: str) -> bytes:
         return resp.read()
 
 
-def fetch_text(url: str) -> str:
-    raw = fetch_bytes(url)
-    return decode_bytes(raw)
-
-
 def decode_bytes(raw: bytes) -> str:
     for enc in ("utf-8-sig", "utf-8", "cp1252", "latin-1"):
         try:
@@ -64,6 +57,10 @@ def decode_bytes(raw: bytes) -> str:
         except UnicodeDecodeError:
             continue
     return raw.decode("utf-8", errors="replace")
+
+
+def fetch_text(url: str) -> str:
+    return decode_bytes(fetch_bytes(url))
 
 
 def normalize_google_sheets_csv_url(url: str) -> str:
@@ -120,6 +117,10 @@ def is_vazio(dt: datetime) -> bool:
     return dt.hour >= 22 or dt.hour < 8
 
 
+def safe_max_dt(rows: list[dict]):
+    return max((r["datetime"] for r in rows), default=None)
+
+
 # =========================================================
 # OMIE
 # =========================================================
@@ -132,12 +133,11 @@ def build_omie_candidate_urls(target_date: date) -> list[str]:
     year = target_date.strftime("%Y")
     month = target_date.strftime("%m")
 
-    urls = [
+    return [
         OMIE_DIRECT_URL_TEMPLATE.format(year=year, month=month, filename=filename),
-        OMIE_DOWNLOAD_URL_TEMPLATE.format(filename=urllib.parse.quote(filename)),
+        OMIE_DOWNLOAD_URL_TEMPLATE_PT.format(filename=urllib.parse.quote(filename)),
         OMIE_DOWNLOAD_URL_TEMPLATE_EN.format(filename=urllib.parse.quote(filename)),
     ]
-    return urls
 
 
 def looks_like_html(text: str) -> bool:
@@ -146,62 +146,65 @@ def looks_like_html(text: str) -> bool:
 
 
 def parse_omie_prices(text: str) -> dict[int, float]:
-    prices = {}
+    """
+    Suporta:
+    - formato antigo: 24 linhas (1..24)
+    - formato novo: 96 períodos de 15 min (1..96)
+
+    Devolve sempre dict {0..23: preço_médio_hora}
+    """
+    hour_buckets = defaultdict(list)
 
     for raw_line in text.splitlines():
         line = raw_line.strip()
         if not line:
             continue
+        if line.upper().startswith("MARGINALPDBCPT"):
+            continue
         if line.startswith("*"):
             continue
 
-        # Divide por ; ou tab
-        parts = [p.strip() for p in re.split(r"[;\t]+", line.strip())]
+        parts = [p.strip() for p in line.split(";")]
 
-        # Tenta encontrar a estrutura típica OMIE
-        # Normalmente a hora está na coluna 3 e o preço na 6,
-        # mas fazemos parser tolerante.
-        candidates = []
+        # Esperado: YYYY;MM;DD;periodo;preco;preco;
+        if len(parts) < 5:
+            continue
 
-        if len(parts) >= 6:
-            candidates.append((parts[2], parts[5]))
+        period_raw = parts[3]
+        price_raw = parts[4].replace(",", ".")
 
-        # Fallback: varrer combinações possíveis da linha
-        for i in range(len(parts)):
-            for j in range(i + 1, len(parts)):
-                candidates.append((parts[i], parts[j]))
+        if not re.fullmatch(r"\d{1,3}", period_raw):
+            continue
 
-        for hour_raw, price_raw in candidates:
-            try:
-                hour_s = hour_raw.strip()
-                price_s = price_raw.strip().replace(",", ".")
+        if not re.fullmatch(r"-?\d+(?:\.\d+)?", price_raw):
+            continue
 
-                if not re.fullmatch(r"\d{1,2}", hour_s):
-                    continue
+        period = int(period_raw)
+        price = float(price_raw)
 
-                hour = int(hour_s)
-                if not (1 <= hour <= 24):
-                    continue
+        # Formato novo OMIE: 96 períodos de 15 min
+        if 1 <= period <= 96:
+            hour = (period - 1) // 4
+            hour_buckets[hour].append(price)
 
-                # preço decimal positivo/negativo
-                if not re.fullmatch(r"-?\d+(?:\.\d+)?", price_s):
-                    continue
+        # Compatibilidade com eventual formato de 24 períodos
+        elif 1 <= period <= 24:
+            hour = period - 1
+            hour_buckets[hour].append(price)
 
-                price = float(price_s)
+    prices = {}
 
-                # guarda a primeira leitura coerente dessa hora
-                idx = hour - 1
-                if idx not in prices:
-                    prices[idx] = price
-                    break
-            except Exception:
-                continue
+    for hour in range(24):
+        vals = hour_buckets.get(hour, [])
+        if not vals:
+            continue
+        prices[hour] = sum(vals) / len(vals)
 
     if len(prices) != 24:
-        snippet = text[:1200].replace("\n", "\\n")
+        snippet = text[:1500].replace("\n", "\\n")
         raise ValueError(
-            f"Não foi possível ler as 24 horas do ficheiro OMIE. "
-            f"Horas lidas: {len(prices)}. Início do conteúdo: {snippet}"
+            f"Não foi possível construir as 24 horas OMIE. "
+            f"Horas construídas: {len(prices)}. Início do conteúdo: {snippet}"
         )
 
     return prices
@@ -218,7 +221,7 @@ def load_omie_day(target_date: date) -> dict[int, float]:
             text = decode_bytes(raw)
 
             if looks_like_html(text):
-                raise ValueError("Resposta OMIE parece HTML em vez de ficheiro TXT.")
+                raise ValueError("Resposta OMIE parece HTML em vez de TXT.")
 
             return parse_omie_prices(text)
 
@@ -241,7 +244,6 @@ def load_omie_day_with_fallback(reference_day: date, max_back_days: int = 5) -> 
             return prices, d
         except Exception as e:
             errors.append(f"{d}: {e}")
-            continue
 
     raise RuntimeError("Falha total OMIE. Tentativas: " + " | ".join(errors))
 
@@ -519,7 +521,7 @@ def calc_month_accumulated(rows: list[dict], today_ref: date) -> dict:
     total_kwh = vazio_kwh + fv_kwh
     total_cost = vazio_cost + fv_cost
     avg_price = (total_cost / total_kwh) if total_kwh > 0 else 0.0
-    last_dt = max((r["datetime"] for r in month_rows), default=None)
+    last_dt = safe_max_dt(month_rows)
 
     return {
         "vazio_kwh": vazio_kwh,
@@ -572,9 +574,7 @@ def build_message(
     if omie_reference_day_requested == omie_reference_day_used:
         lines.append(f"OMIE ({omie_reference_day_used.strftime('%d/%m/%Y')}): {format_num(omie_avg, 1)} €/MWh")
     else:
-        lines.append(
-            f"OMIE ({omie_reference_day_used.strftime('%d/%m/%Y')} - fallback): {format_num(omie_avg, 1)} €/MWh"
-        )
+        lines.append(f"OMIE ({omie_reference_day_used.strftime('%d/%m/%Y')} - fallback): {format_num(omie_avg, 1)} €/MWh")
 
     lines.append("")
     lines.append("⚡ G9 Indexado")
@@ -624,7 +624,7 @@ def build_message(
 def main():
     today_ref = datetime.now().date()
 
-    # OMIE de ontem -> é o pretendido para o dia da mensagem
+    # OMIE de ontem -> reflete-se no dia da mensagem
     omie_reference_day_requested = today_ref - timedelta(days=1)
     omie_prices, omie_reference_day_used = load_omie_day_with_fallback(
         omie_reference_day_requested,
