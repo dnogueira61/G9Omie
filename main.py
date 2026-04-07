@@ -182,12 +182,9 @@ def parse_omie_prices(text: str) -> dict[int, float]:
         period = int(period_raw)
         price = float(price_raw)
 
-        # Formato novo OMIE: 96 períodos de 15 min
         if 1 <= period <= 96:
             hour = (period - 1) // 4
             hour_buckets[hour].append(price)
-
-        # Compatibilidade com eventual formato de 24 períodos
         elif 1 <= period <= 24:
             hour = period - 1
             hour_buckets[hour].append(price)
@@ -295,7 +292,14 @@ def parse_eredes_datetime(data_str: str, hora_str: str) -> datetime:
     data_str = data_str.strip()
     hora_str = hora_str.strip()
 
-    for fmt in ("%d/%m/%Y %H:%M", "%Y-%m-%d %H:%M"):
+    formats = (
+        "%d/%m/%Y %H:%M",
+        "%Y-%m-%d %H:%M",
+        "%Y/%m/%d %H:%M",
+        "%d-%m-%Y %H:%M",
+    )
+
+    for fmt in formats:
         try:
             return datetime.strptime(f"{data_str} {hora_str}", fmt)
         except Exception:
