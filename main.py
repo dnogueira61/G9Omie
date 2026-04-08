@@ -45,19 +45,19 @@ def periodo_label(dt: datetime) -> str:
 
 
 def normalize_google_sheets_url(url: str) -> str:
-    if "docs.google.com/spreadsheets" in url and "/export?" not in url:
-        if "/edit" in url:
-            base = url.split("/edit")[0]
-        else:
-            base = url
+    if "docs.google.com/spreadsheets" not in url:
+        return url
 
-        if "gid=" in url:
-            gid = url.split("gid=")[-1].split("&")[0]
+    base = url.split("?")[0]
+    if "/edit" in base:
+        base = base.split("/edit")[0]
+
+    if "gid=" in url:
+        gid = url.split("gid=")[-1].split("&")[0].strip()
+        if gid:
             return f"{base}/export?format=csv&gid={gid}"
 
-        return f"{base}/export?format=csv"
-
-    return url
+    return f"{base}/export?format=csv"
 
 
 def fetch_text(url: str) -> str:
@@ -118,7 +118,6 @@ def normalize_eredes_dataframe(df: pd.DataFrame) -> pd.DataFrame:
         raise RuntimeError(f"Não encontrei as colunas esperadas. Colunas: {list(df.columns)}")
 
     rows = []
-
     for _, r in df.iterrows():
         data_raw = str(r.get(col_data, "")).strip()
         hora_raw = str(r.get(col_hora, "")).strip()
@@ -186,7 +185,6 @@ def load_eredes_15m_data() -> list[dict]:
 def omie_candidate_urls_for_date(d: datetime) -> list[str]:
     ymd = d.strftime("%Y%m%d")
     filename = f"marginalpdbcpt_{ymd}.1"
-
     return [
         f"https://www.omie.es/pt/file-download?filename={filename}&parents=marginalpdbcpt",
         f"https://www.omie.es/en/file-download?filename={filename}&parents=marginalpdbcpt",
@@ -229,8 +227,6 @@ def parse_omie_file_for_day(target_day: datetime) -> dict[int, float]:
         if not parts or parts[0].upper() == "MARGINALPDBCPT":
             continue
 
-        # formato real:
-        # 2026;04;01;1;9.17;9.17;
         if len(parts) >= 6:
             try:
                 year = int(parts[0])
@@ -243,7 +239,6 @@ def parse_omie_file_for_day(target_day: datetime) -> dict[int, float]:
                     continue
 
                 prices[period] = price
-                continue
             except Exception:
                 pass
 
@@ -302,15 +297,8 @@ def load_master_df() -> pd.DataFrame:
     if not os.path.exists(MASTER_FILE):
         return pd.DataFrame(
             columns=[
-                "timestamp",
-                "date",
-                "time",
-                "periodo",
-                "consumo_kwh",
-                "estado",
-                "omie_eur_mwh",
-                "g9_eur_kwh",
-                "custo_eur",
+                "timestamp", "date", "time", "periodo", "consumo_kwh", "estado",
+                "omie_eur_mwh", "g9_eur_kwh", "custo_eur",
             ]
         )
 
@@ -344,24 +332,15 @@ def load_master_df() -> pd.DataFrame:
     if "periodo" not in df.columns:
         df["periodo"] = df["timestamp"].apply(periodo_label)
 
-    # Excel não suporta timezone; internamente deixamos naive
-    if pd.api.types.is_datetime64_any_dtype(df["timestamp"]):
-        try:
-            df["timestamp"] = df["timestamp"].dt.tz_localize(None)
-        except TypeError:
-            pass
+    try:
+        df["timestamp"] = df["timestamp"].dt.tz_localize(None)
+    except Exception:
+        pass
 
     return df[
         [
-            "timestamp",
-            "date",
-            "time",
-            "periodo",
-            "consumo_kwh",
-            "estado",
-            "omie_eur_mwh",
-            "g9_eur_kwh",
-            "custo_eur",
+            "timestamp", "date", "time", "periodo", "consumo_kwh", "estado",
+            "omie_eur_mwh", "g9_eur_kwh", "custo_eur",
         ]
     ].copy()
 
@@ -388,7 +367,6 @@ def update_master(rows: list[dict]) -> pd.DataFrame:
     combined = combined.sort_values("timestamp")
     combined = combined.drop_duplicates(subset=["timestamp"], keep="last")
 
-    # converter para hora local e remover timezone para gravar em Excel
     combined["timestamp"] = combined["timestamp"].dt.tz_convert("Europe/Lisbon")
     combined["date"] = combined["timestamp"].dt.strftime("%Y-%m-%d")
     combined["time"] = combined["timestamp"].dt.strftime("%H:%M")
@@ -397,15 +375,8 @@ def update_master(rows: list[dict]) -> pd.DataFrame:
 
     combined = combined[
         [
-            "timestamp",
-            "date",
-            "time",
-            "periodo",
-            "consumo_kwh",
-            "estado",
-            "omie_eur_mwh",
-            "g9_eur_kwh",
-            "custo_eur",
+            "timestamp", "date", "time", "periodo", "consumo_kwh", "estado",
+            "omie_eur_mwh", "g9_eur_kwh", "custo_eur",
         ]
     ].sort_values("timestamp").reset_index(drop=True)
 
@@ -467,14 +438,9 @@ def summarize_day(df: pd.DataFrame, day: pd.Timestamp) -> dict:
 def summarize_month(df: pd.DataFrame) -> dict:
     if df.empty:
         return {
-            "kwh_vazio": 0.0,
-            "kwh_fv": 0.0,
-            "kwh_total": 0.0,
-            "cost_vazio": 0.0,
-            "cost_fv": 0.0,
-            "cost_total": 0.0,
-            "avg_price": 0.0,
-            "last_update": None,
+            "kwh_vazio": 0.0, "kwh_fv": 0.0, "kwh_total": 0.0,
+            "cost_vazio": 0.0, "cost_fv": 0.0, "cost_total": 0.0,
+            "avg_price": 0.0, "last_update": None,
         }
 
     latest = df["timestamp"].max()
@@ -577,23 +543,23 @@ def get_today_g9_prices_and_windows() -> tuple[float, float, float, str]:
 
 
 def send_telegram_message(text: str) -> None:
-    if not TELEGRAM_TOKEN or not TELEGRAM_CHAT_ID:
-        print(text)
-        return
+    if not TELEGRAM_TOKEN:
+        raise RuntimeError("TELEGRAM_TOKEN em falta no ambiente.")
+    if not TELEGRAM_CHAT_ID:
+        raise RuntimeError("TELEGRAM_CHAT_ID em falta no ambiente.")
 
     url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
-    r = requests.post(url, data={"chat_id": TELEGRAM_CHAT_ID, "text": text}, timeout=60)
+    r = requests.post(
+        url,
+        data={"chat_id": TELEGRAM_CHAT_ID, "text": text},
+        timeout=60,
+    )
+    print("Telegram status:", r.status_code)
+    print("Telegram response:", r.text)
     r.raise_for_status()
 
 
-def build_message(
-    day_summary: dict,
-    month_summary: dict,
-    omie_yesterday_avg: float,
-    g9_vazio: float,
-    g9_fv: float,
-    janela: str,
-) -> str:
+def build_message(day_summary: dict, month_summary: dict, omie_yesterday_avg: float, g9_vazio: float, g9_fv: float, janela: str) -> str:
     ref_date = now_local()
     day = pd.Timestamp(day_summary["day"]).to_pydatetime()
     last_upd = month_summary["last_update"]
