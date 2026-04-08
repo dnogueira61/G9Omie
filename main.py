@@ -144,7 +144,7 @@ def normalize_eredes_dataframe(df: pd.DataFrame) -> pd.DataFrame:
                 "date": dt.strftime("%Y-%m-%d"),
                 "time": dt.strftime("%H:%M"),
                 "periodo": periodo_label(dt),
-                "consumo_kwh": parse_float_safe(consumo_raw),
+                "consumo_kwh": parse_float_safe(consumo_raw) / 4.0,
                 "estado": estado_raw,
             }
         )
