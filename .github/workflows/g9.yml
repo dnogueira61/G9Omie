@@ -23,8 +23,11 @@ jobs:
           python -m pip install --upgrade pip
           pip install pandas requests openpyxl matplotlib
 
-      - name: List files
-        run: ls -R
+      - name: Debug env presence
+        run: |
+          echo "TELEGRAM_TOKEN set? ${{ secrets.TELEGRAM_TOKEN != '' }}"
+          echo "TELEGRAM_CHAT_ID set? ${{ secrets.TELEGRAM_CHAT_ID != '' }}"
+          echo "EREDES_CSV_URL set? ${{ secrets.EREDES_CSV_URL != '' }}"
 
       - name: Run main script
         env:
@@ -37,5 +40,5 @@ jobs:
           GGS: ${{ vars.GGS }}
           TAR_VAZIO: ${{ vars.TAR_VAZIO }}
           TAR_FV: ${{ vars.TAR_FV }}
-          FORCE_RUN: "0"
+          FORCE_RUN: "1"
         run: python main.py
